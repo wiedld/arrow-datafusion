@@ -1348,6 +1348,7 @@ drop table ts_data_secs
 ## Timezone impact on builtin scalar functions
 #
 # server time = +07
+# timestamptz = typed string literals
 ##########
 
 statement ok
@@ -1406,7 +1407,72 @@ SELECT date_part('hour', TIMESTAMPTZ '2000-01-01T01:01:01Z') as part
 ##########
 ## Timezone impact on builtin scalar functions
 #
+# server time = +07
+# timestamptz = columnar values
+##########
+
+statement ok
+set timezone to '+07';
+
+statement ok
+CREATE TABLE IF NOT EXISTS test_timestamptz_coersion (
+  time TIMESTAMP WITH TIME ZONE
+) AS VALUES
+  ('2000-01-01T01:01:01'),
+  ('2000-01-01T01:01:01Z');
+
+# expected:
+# 2000-01-01 01:01:01+07
+# 2000-01-01 08:01:01+07
+query P
+select * from test_timestamptz_coersion
+----
+2000-01-01T01:01:01+07:00
+2000-01-01T08:01:01+07:00
+
+# expected:
+# 2000-01-01 01:00:00+07
+# 2000-01-01 08:00:00+07
+query P
+SELECT date_trunc('hour', time) FROM test_timestamptz_coersion
+----
+1999-12-31T18:00:00
+2000-01-01T01:00:00
+
+# expected:
+# 2000-01-01 00:00:00+07
+# 2000-01-01 00:00:00+07
+query P
+SELECT date_trunc('day', time) FROM test_timestamptz_coersion
+----
+1999-12-31T00:00:00
+2000-01-01T00:00:00
+
+# expected:
+# 2000-01-01 00:00:00+07
+# 2000-01-01 00:00:00+07
+query P
+SELECT date_bin('1 day', time, TIMESTAMPTZ '2020-01-01') FROM test_timestamptz_coersion
+----
+1999-12-31T17:00:00
+1999-12-31T17:00:00
+
+# expected:
+# 1
+# 8
+query R
+SELECT date_part('hour', time) FROM test_timestamptz_coersion
+----
+1
+8
+
+
+
+##########
+## Timezone impact on builtin scalar functions
+#
 # server time = UTC
+# timestamptz = typed string literals
 ##########
 
 statement ok
@@ -1459,6 +1525,123 @@ query R
 SELECT date_part('hour', TIMESTAMPTZ '2000-01-01T01:01:01+07') as part
 ----
 18
+
+
+
+##########
+## Timezone impact on builtin scalar functions
+#
+# server time = UTC
+# timestamptz = columnar values
+##########
+
+statement ok
+set timezone to '+00';
+
+statement ok
+CREATE TABLE IF NOT EXISTS test_timestamptz_coersion_utc (
+  time TIMESTAMP WITH TIME ZONE
+) AS VALUES
+  ('2000-01-01T01:01:01'),
+  ('2000-01-01T01:01:01+07');
+
+# expected:
+# 2000-01-01T01:01:01+00
+# 1999-12-31T18:01:01+00
+query P
+SELECT * FROM test_timestamptz_coersion_utc
+----
+2000-01-01T01:01:01Z
+1999-12-31T18:01:01Z
+
+# expected:
+# 2000-01-01T01:00:00+00
+# 1999-12-31T18:00:00+00
+query P
+SELECT date_trunc('hour', time) FROM test_timestamptz_coersion_utc
+----
+2000-01-01T01:00:00
+1999-12-31T18:00:00
+
+# expected:
+# 2000-01-01 00:00:00+00
+# 1999-12-31 00:00:00+00
+query P
+SELECT date_trunc('day', time) FROM test_timestamptz_coersion_utc
+----
+2000-01-01T00:00:00
+1999-12-31T00:00:00
+
+# expected:
+# 2000-01-01 00:00:00+00
+# 1999-12-31 00:00:00+00
+query P
+SELECT date_bin('1 day', time, TIMESTAMPTZ '2020-01-01') FROM test_timestamptz_coersion_utc
+----
+2000-01-01T00:00:00
+1999-12-31T00:00:00
+
+# expected:
+# 1
+# 18
+query R
+SELECT date_part('hour', time) FROM test_timestamptz_coersion_utc
+----
+1
+18
+
+
+
+##########
+## Timezone impact on date_bin
+#
+# server time = UTC
+##########
+
+statement ok
+set timezone to '+00';
+
+# date_bin with, and without, and origin
+# typed string literal
+query P rowsort
+SELECT date_bin('1 minute', TIMESTAMPTZ '2000-01-01T00:00:00Z', TIMESTAMPTZ '1970-01-01T00:00:00Z') as ts
+ UNION ALL
+SELECT date_bin('1 minute', TIMESTAMPTZ '2000-01-01T00:00:01Z', TIMESTAMPTZ '1970-01-01T00:00:00Z') as ts
+ UNION ALL
+SELECT date_bin('1 minute', TIMESTAMPTZ '2000-01-01T00:00:00Z') as ts
+ UNION ALL
+SELECT date_bin('1 minute', TIMESTAMPTZ '2000-01-01T00:00:01Z') as ts
+----
+2000-01-01T00:00:00Z
+2000-01-01T00:00:00Z
+2000-01-01T00:00:00Z
+2000-01-01T00:00:00Z
+
+statement ok
+CREATE TABLE IF NOT EXISTS test_timestamptz_monotonic_incr (
+  time TIMESTAMP WITH TIME ZONE
+) AS VALUES
+  ('2000-01-01T00:00:00Z'),
+  ('2000-01-01T00:00:01Z');
+
+# date_bin with, and without, and origin
+# columnar value
+# expected: 2000-01-01T00:00:00Z for all 4 rows
+query P rowsort
+SELECT date_bin('1 minute', time, TIMESTAMPTZ '1970-01-01T00:00:00Z') FROM test_timestamptz_monotonic_incr
+  UNION ALL
+SELECT date_bin('1 minute', time) FROM test_timestamptz_monotonic_incr
+----
+2000-01-01T00:00:00
+2000-01-01T00:00:00
+2000-01-01T00:00:00
+2000-01-01T00:00:00
+
+# date_bin missing the `TIMESTAMPTZ` on the origin
+# columnar value
+# expected: 2000-01-01T00:00:00Z
+statement error
+SELECT date_bin('1 minute', time, '1970-01-01T00:00:00Z') FROM test_timestamptz_monotonic_incr
 
 
 
