@@ -26,8 +26,12 @@ use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 use futures::stream::{Fuse, StreamExt};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
+
+use super::batches::{BatchCursor, BatchTracker};
+use super::builder::YieldedSortOrder;
 
 /// A [`Stream`](futures::Stream) that has multiple partitions that can
 /// be polled separately but not concurrently
@@ -48,9 +52,24 @@ pub trait PartitionedStream: std::fmt::Debug + Send {
     ) -> Poll<Option<Self::Output>>;
 }
 
-/// A fallible [`PartitionedStream`] of [`Cursor`](super::cursor::Cursor) and [`RecordBatch`]
-pub(crate) type CursorStream<C> =
+/// A fallible [`PartitionedStream`] of record batches, with corresponding cursors.
+///
+/// Each [`Cursor`](super::cursor::Cursor) and [`RecordBatch`] represents a single record batch.
+pub(crate) type BatchCursorStream<C> =
     Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
+
+/// A [`PartitionedStream`] of cursors ([`BatchCursor`]s).
+///
+/// Each cursor corresponds to a record batch (in part or in whole)
+/// tracked by [`BatchId`](super::batches::BatchId).
+pub(crate) type CursorStream<C> =
+    Box<dyn PartitionedStream<Output = Result<BatchCursor<C>>>>;
+
+/// A stream of yielded [`SortOrder`](super::builder::SortOrder)s, with the corresponding [`BatchCursor`]s, is a [`MergeStream`].
+///
+/// Each merge node (a.k.a. `SortPreservingMergeStream` loser tree), will yield a SortOrder.
+pub(crate) type MergeStream<C> =
+    Pin<Box<dyn futures::Stream<Item = Result<YieldedSortOrder<C>>> + Send>>;
 
 /// A newtype wrapper around a set of fused [`SendableRecordBatchStream`]
 /// that implements debug, and skips over empty [`RecordBatch`]
@@ -209,5 +228,54 @@ impl<T: FieldArray> PartitionedStream for FieldCursorStream<T> {
                 Ok((cursor, batch))
             })
         }))
+    }
+}
+
+/// Converts a [`BatchCursorStream`] to a [`CursorStream`].
+///
+/// Collects the [`RecordBatch`] per poll,
+/// and only passes along the [`BatchCursor`].
+pub(crate) struct BatchTrackerStream<C> {
+    // Partitioned Input stream.
+    streams: BatchCursorStream<C>,
+    record_batch_holder: Arc<BatchTracker>,
+}
+
+impl<C> BatchTrackerStream<C> {
+    pub fn new(
+        streams: BatchCursorStream<C>,
+        record_batch_holder: Arc<BatchTracker>,
+    ) -> Self {
+        Self {
+            streams,
+            record_batch_holder,
+        }
+    }
+}
+
+impl<C> PartitionedStream for BatchTrackerStream<C> {
+    type Output = Result<BatchCursor<C>>;
+
+    fn partitions(&self) -> usize {
+        self.streams.partitions()
+    }
+
+    fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+        stream_idx: usize,
+    ) -> Poll<Option<Self::Output>> {
+        Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
+            r.and_then(|(cursor, batch)| {
+                let batch_id = self.record_batch_holder.add_batch(batch)?;
+                Ok(BatchCursor::new(batch_id, cursor))
+            })
+        }))
+    }
+}
+
+impl<C> std::fmt::Debug for BatchTrackerStream<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchTrackerStream").finish()
     }
 }

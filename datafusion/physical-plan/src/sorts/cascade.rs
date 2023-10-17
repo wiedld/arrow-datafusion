@@ -15,56 +15,84 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::metrics::BaselineMetrics;
-use crate::sorts::cursor::Cursor;
-use crate::RecordBatchStream;
+use arrow::compute::interleave;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion_common::Result;
-use datafusion_execution::{memory_pool::MemoryReservation, SendableRecordBatchStream};
+use datafusion_execution::memory_pool::MemoryReservation;
 use futures::Stream;
+use std::collections::HashMap;
 use std::marker::Send;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
-use super::merge::SortPreservingMergeStream;
-use super::stream::CursorStream;
+use crate::metrics::BaselineMetrics;
+use crate::sorts::cursor::Cursor;
+use crate::RecordBatchStream;
 
-pub(crate) struct SortPreservingCascadeStream {
+use super::batches::{BatchId, BatchTracker};
+use super::builder::SortOrder;
+use super::merge::SortPreservingMergeStream;
+use super::stream::{BatchCursorStream, BatchTrackerStream, MergeStream};
+
+/// Sort preserving cascade stream
+///
+/// The cascade is built using a series of streams, each with a different purpose:
+///   * Streams leading into the leaf nodes:
+///      1. [`BatchCursorStream`] yields the initial cursors and batches. (e.g. a RowCursorStream)
+///         * This initial stream is for a number of partitions (e.g. 100).
+///         * only a single BatchCursorStream.
+///      2. TODO
+///      3. [`BatchTrackerStream`] is used to collect the record batches from the leaf nodes.
+///         * contains a single, shared use of [`BatchTracker`].
+///         * polling of streams is non-blocking across streams/partitions.
+///
+/// * Streams between merge nodes:
+///      1. a single [`MergeStream`] is yielded per node.
+///
+pub(crate) struct SortPreservingCascadeStream<C> {
     /// If the stream has encountered an error, or fetch is reached
     aborted: bool,
 
     /// The sorted input streams to merge together
     /// TODO: this will become the root of the cascade tree
-    cascade: SendableRecordBatchStream,
+    cascade: MergeStream<C>,
 
     /// used to record execution metrics
     metrics: BaselineMetrics,
+
+    /// Batches are collected on first yield from the [`BatchCursorStream`].
+    /// Subsequent merges in cascade all refer to the [`BatchId`] using [`BatchCursor`](super::batches::BatchCursor)s.
+    record_batch_collector: Arc<BatchTracker>,
 
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
 }
 
-impl SortPreservingCascadeStream {
-    pub(crate) fn new<C: Cursor + Send + Unpin + 'static>(
-        streams: CursorStream<C>,
+impl<C: Cursor + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
+    pub(crate) fn new(
+        streams: BatchCursorStream<C>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
         batch_size: usize,
         fetch: Option<usize>,
         reservation: MemoryReservation,
     ) -> Self {
+        let batch_tracker = Arc::new(BatchTracker::new(reservation.new_empty()));
+
+        let streams = BatchTrackerStream::new(streams, batch_tracker.clone());
+
         Self {
             aborted: false,
             metrics: metrics.clone(),
+            record_batch_collector: batch_tracker,
             schema: schema.clone(),
             cascade: Box::pin(SortPreservingMergeStream::new(
-                streams,
-                schema,
+                Box::new(streams),
                 metrics,
                 batch_size,
                 fetch,
-                reservation,
             )),
         }
     }
@@ -83,12 +111,74 @@ impl SortPreservingCascadeStream {
                 self.aborted = true;
                 Poll::Ready(Some(Err(e)))
             }
-            Some(Ok(res)) => Poll::Ready(Some(Ok(res))),
+            Some(Ok((_, sort_order))) => match self.build_record_batch(sort_order) {
+                Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                Err(e) => {
+                    self.aborted = true;
+                    Poll::Ready(Some(Err(e)))
+                }
+            },
         }
+    }
+
+    /// Construct and yield the root node [`RecordBatch`]s.
+    fn build_record_batch(&mut self, sort_order: Vec<SortOrder>) -> Result<RecordBatch> {
+        let mut batches_needed = Vec::with_capacity(sort_order.len());
+        let mut batches_seen: HashMap<BatchId, (usize, usize)> =
+            HashMap::with_capacity(sort_order.len()); // (batch_idx, max_row_idx)
+
+        let mut adjusted_sort_order = Vec::with_capacity(sort_order.len());
+
+        for (batch_id, row_idx) in sort_order.iter() {
+            let batch_idx = match batches_seen.get(batch_id) {
+                Some((batch_idx, _)) => *batch_idx,
+                None => {
+                    let batch_idx = batches_seen.len();
+                    batches_needed.push(*batch_id);
+                    batch_idx
+                }
+            };
+            adjusted_sort_order.push((batch_idx, *row_idx));
+            batches_seen.insert(*batch_id, (batch_idx, *row_idx));
+        }
+
+        let batches = self
+            .record_batch_collector
+            .get_batches(batches_needed.as_slice());
+
+        // remove record_batches (from the batch tracker) that are fully yielded
+        let batches_to_remove = batches
+            .iter()
+            .zip(batches_needed)
+            .filter_map(|(batch, batch_id)| {
+                let max_row_idx = batches_seen[&batch_id].1;
+                if batch.num_rows() == max_row_idx + 1 {
+                    Some(batch_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // record_batch data to yield
+        let columns = (0..self.schema.fields.len())
+            .map(|column_idx| {
+                let arrays: Vec<_> = batches
+                    .iter()
+                    .map(|batch| batch.column(column_idx).as_ref())
+                    .collect();
+                Ok(interleave(&arrays, adjusted_sort_order.as_slice())?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        self.record_batch_collector
+            .remove_batches(batches_to_remove.as_slice());
+
+        Ok(RecordBatch::try_new(self.schema.clone(), columns)?)
     }
 }
 
-impl Stream for SortPreservingCascadeStream {
+impl<C: Cursor + Unpin + Send + 'static> Stream for SortPreservingCascadeStream<C> {
     type Item = Result<RecordBatch>;
 
     fn poll_next(
@@ -100,7 +190,9 @@ impl Stream for SortPreservingCascadeStream {
     }
 }
 
-impl RecordBatchStream for SortPreservingCascadeStream {
+impl<C: Cursor + Unpin + Send + 'static> RecordBatchStream
+    for SortPreservingCascadeStream<C>
+{
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
