@@ -31,15 +31,18 @@ use futures::Stream;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
+use super::rowset::RowSet;
+
 /// A fallible [`PartitionedStream`] of [`Cursor`] and [`RecordBatch`]
-type CursorStream<C> = Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
+type CursorStream<R> =
+    Box<dyn PartitionedStream<Output = Result<(Cursor<R>, RecordBatch)>>>;
 
 #[derive(Debug)]
-pub(crate) struct SortPreservingMergeStream<C> {
+pub(crate) struct SortPreservingMergeStream<R> {
     in_progress: BatchBuilder,
 
     /// The sorted input streams to merge together
-    streams: CursorStream<C>,
+    streams: CursorStream<R>,
 
     /// used to record execution metrics
     metrics: BaselineMetrics,
@@ -89,7 +92,7 @@ pub(crate) struct SortPreservingMergeStream<C> {
     batch_size: usize,
 
     /// Vector that holds cursors for each non-exhausted input partition
-    cursors: Vec<Option<C>>,
+    cursors: Vec<Option<Cursor<R>>>,
 
     /// Optional number of rows to fetch
     fetch: Option<usize>,
@@ -98,9 +101,12 @@ pub(crate) struct SortPreservingMergeStream<C> {
     produced: usize,
 }
 
-impl<C: Cursor> SortPreservingMergeStream<C> {
+impl<R: RowSet> SortPreservingMergeStream<R>
+where
+    Cursor<R>: Ord,
+{
     pub(crate) fn new(
-        streams: CursorStream<C>,
+        streams: CursorStream<R>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
         batch_size: usize,
@@ -310,7 +316,10 @@ impl<C: Cursor> SortPreservingMergeStream<C> {
     }
 }
 
-impl<C: Cursor + Unpin> Stream for SortPreservingMergeStream<C> {
+impl<R: RowSet> Stream for SortPreservingMergeStream<R>
+where
+    Cursor<R>: Ord,
+{
     type Item = Result<RecordBatch>;
 
     fn poll_next(
@@ -322,7 +331,10 @@ impl<C: Cursor + Unpin> Stream for SortPreservingMergeStream<C> {
     }
 }
 
-impl<C: Cursor + Unpin> RecordBatchStream for SortPreservingMergeStream<C> {
+impl<R: RowSet> RecordBatchStream for SortPreservingMergeStream<R>
+where
+    Cursor<R>: Ord,
+{
     fn schema(&self) -> SchemaRef {
         self.in_progress.schema().clone()
     }
