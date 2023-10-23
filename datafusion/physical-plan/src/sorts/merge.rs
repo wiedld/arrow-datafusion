@@ -30,14 +30,14 @@ use futures::Stream;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
-use super::stream::CursorStream;
+use super::stream::BatchStream;
 
 #[derive(Debug)]
 pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     in_progress: SortOrderBuilder<C>,
 
     /// The sorted input streams to merge together
-    streams: CursorStream<C>,
+    streams: BatchStream<C>,
 
     /// used to record execution metrics
     metrics: BaselineMetrics,
@@ -95,7 +95,7 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 
 impl<C: CursorValues> SortPreservingMergeStream<C> {
     pub(crate) fn new(
-        streams: CursorStream<C>,
+        streams: BatchStream<C>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
         batch_size: usize,

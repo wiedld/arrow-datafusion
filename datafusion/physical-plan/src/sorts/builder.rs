@@ -75,7 +75,7 @@ impl<C: CursorValues> SortOrderBuilder<C> {
         let batch_idx = self.batches.len();
         self.batches.push((stream_idx, batch));
         self.cursors[stream_idx] = Some(BatchCursor {
-            batch_idx,
+            batch_id: BatchId(batch_idx as u64),
             cursor: Cursor::new(cursor_values),
             row_idx: 0,
         });
@@ -86,12 +86,13 @@ impl<C: CursorValues> SortOrderBuilder<C> {
     pub fn push_row(&mut self, stream_idx: usize) {
         let BatchCursor {
             cursor: _,
-            batch_idx,
+            batch_id,
             row_idx,
         } = self.cursors[stream_idx]
             .as_mut()
             .expect("row pushed for non-existant cursor");
-        self.indices.push((*batch_idx, *row_idx));
+        let batch_idx = batch_id.0 as usize; // temporary. Will be removed.
+        self.indices.push((batch_idx, *row_idx));
         *row_idx += 1;
     }
 
@@ -212,11 +213,11 @@ impl<C: CursorValues> SortOrderBuilder<C> {
                 .as_mut()
                 .expect("should have batch cursor");
 
-            let retain = batch_cursor.batch_idx == batch_idx;
+            let retain = batch_cursor.batch_id.0 == batch_idx as u64;
             batch_idx += 1;
 
             if retain {
-                batch_cursor.batch_idx = retained;
+                batch_cursor.batch_id = BatchId(retained as u64);
                 retained += 1;
             } else {
                 self.reservation.shrink(batch.get_array_memory_size());

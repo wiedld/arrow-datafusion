@@ -28,7 +28,7 @@ use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
 use super::merge::SortPreservingMergeStream;
-use super::stream::CursorStream;
+use super::stream::BatchStream;
 
 pub(crate) struct SortPreservingCascadeStream {
     /// If the stream has encountered an error, or fetch is reached
@@ -47,7 +47,7 @@ pub(crate) struct SortPreservingCascadeStream {
 
 impl SortPreservingCascadeStream {
     pub(crate) fn new<C: CursorValues + Send + Unpin + 'static>(
-        streams: CursorStream<C>,
+        streams: BatchStream<C>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
         batch_size: usize,

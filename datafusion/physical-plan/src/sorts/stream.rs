@@ -15,7 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::sorts::cursor::{ArrayValues, CursorArray, RowValues};
+use crate::sorts::batches::{BatchCursor, BatchTracker};
+use crate::sorts::cursor::{ArrayValues, Cursor, CursorArray, CursorValues, RowValues};
 use crate::SendableRecordBatchStream;
 use crate::{PhysicalExpr, PhysicalSortExpr};
 use arrow::array::Array;
@@ -49,8 +50,12 @@ pub trait PartitionedStream: std::fmt::Debug + Send {
 }
 
 /// A fallible [`PartitionedStream`] of [`Cursor`](super::cursor::Cursor) and [`RecordBatch`]
-pub(crate) type CursorStream<C> =
+pub(crate) type BatchStream<C> =
     Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
+
+/// A [`PartitionedStream`] of [`BatchCursor`]s.
+pub(crate) type BatchCursorStream<C> =
+    Box<dyn PartitionedStream<Output = Result<BatchCursor<C>>>>;
 
 /// A newtype wrapper around a set of fused [`SendableRecordBatchStream`]
 /// that implements debug, and skips over empty [`RecordBatch`]
@@ -209,5 +214,55 @@ impl<T: CursorArray> PartitionedStream for FieldCursorStream<T> {
                 Ok((cursor, batch))
             })
         }))
+    }
+}
+
+/// Converts a [`BatchStream`] to a [`BatchCursorStream`].
+///
+/// Collects the [`RecordBatch`] per poll,
+/// and only passes along the [`BatchCursor`].
+pub(crate) struct BatchTrackerStream<C> {
+    // Partitioned Input stream.
+    streams: BatchStream<C>,
+    record_batch_holder: Arc<BatchTracker>,
+}
+
+impl<C> BatchTrackerStream<C> {
+    pub fn new(streams: BatchStream<C>, record_batch_holder: Arc<BatchTracker>) -> Self {
+        Self {
+            streams,
+            record_batch_holder,
+        }
+    }
+}
+
+impl<C: CursorValues> PartitionedStream for BatchTrackerStream<C> {
+    type Output = Result<BatchCursor<C>>;
+
+    fn partitions(&self) -> usize {
+        self.streams.partitions()
+    }
+
+    fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+        stream_idx: usize,
+    ) -> Poll<Option<Self::Output>> {
+        Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
+            r.and_then(|(cursor_values, batch)| {
+                let batch_id = self.record_batch_holder.add_batch(batch)?;
+                Ok(BatchCursor {
+                    batch_id,
+                    row_idx: 0,
+                    cursor: Cursor::new(cursor_values),
+                })
+            })
+        }))
+    }
+}
+
+impl<C> std::fmt::Debug for BatchTrackerStream<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchTrackerStream").finish()
     }
 }
