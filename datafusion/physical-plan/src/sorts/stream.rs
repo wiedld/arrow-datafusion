@@ -16,6 +16,7 @@
 // under the License.
 
 use crate::sorts::batches::{BatchCursor, BatchTracker};
+use crate::sorts::builder::YieldedSortOrder;
 use crate::sorts::cursor::{ArrayValues, Cursor, CursorArray, CursorValues, RowValues};
 use crate::SendableRecordBatchStream;
 use crate::{PhysicalExpr, PhysicalSortExpr};
@@ -27,7 +28,7 @@ use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 use futures::stream::{Fuse, StreamExt};
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 use std::task::{ready, Context, Poll};
 
 /// A [`Stream`](futures::Stream) that has multiple partitions that can
@@ -56,6 +57,12 @@ pub(crate) type BatchStream<C> =
 /// A [`PartitionedStream`] of [`BatchCursor`]s.
 pub(crate) type BatchCursorStream<C> =
     Box<dyn PartitionedStream<Output = Result<BatchCursor<C>>>>;
+
+/// A stream of yielded [`SortOrder`](super::builder::SortOrder)s, with the corresponding [`BatchCursor`]s, is a [`MergeStream`].
+///
+/// Each merge node (a.k.a. `SortPreservingMergeStream` + `SortOrderBuilder`), will yield a [`MergeStream`].
+pub(crate) type MergeStream<C> =
+    Pin<Box<dyn futures::Stream<Item = Result<YieldedSortOrder<C>>> + Send>>;
 
 /// A newtype wrapper around a set of fused [`SendableRecordBatchStream`]
 /// that implements debug, and skips over empty [`RecordBatch`]
@@ -251,11 +258,7 @@ impl<C: CursorValues> PartitionedStream for BatchTrackerStream<C> {
         Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
             r.and_then(|(cursor_values, batch)| {
                 let batch_id = self.record_batch_holder.add_batch(batch)?;
-                Ok(BatchCursor {
-                    batch_id,
-                    row_idx: 0,
-                    cursor: Cursor::new(cursor_values),
-                })
+                Ok(BatchCursor::new(batch_id, cursor_values))
             })
         }))
     }

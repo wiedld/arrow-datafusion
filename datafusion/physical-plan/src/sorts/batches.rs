@@ -130,6 +130,39 @@ pub struct BatchCursor<C: CursorValues> {
     pub cursor: Cursor<C>,
 }
 
+impl<C: CursorValues> BatchCursor<C> {
+    /// Create a new [`BatchCursor`] from [`CursorValues`] and a [`BatchId`].
+    pub fn new(batch_id: BatchId, cursor_values: C) -> Self {
+        Self {
+            batch_id,
+            cursor: Cursor::new(cursor_values),
+            row_idx: 0,
+        }
+    }
+
+    /// Reset for next merge node
+    pub fn reset(&mut self) {
+        unimplemented!("Cursor interfaces will exist in next CursorValues PR");
+        // self.cursor = Cursor::new(self.cursor.cursor_values());
+    }
+
+    /// Slice for partial yielded batches
+    pub fn slice(&self, offset: usize, length: usize) -> Self {
+        unimplemented!("Cursor interfaces will exist in next CursorValues PR");
+        let cursor = Cursor::new(self.cursor.cursor_values().slice(offset, length));
+        Self {
+            batch_id: self.batch_id,
+            cursor,
+            row_idx
+        }
+    }
+
+    /// Get batch_id
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
+    }
+}
+
 /// Unique tracking id, assigned per record batch.
 #[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
 pub struct BatchId(pub u64);

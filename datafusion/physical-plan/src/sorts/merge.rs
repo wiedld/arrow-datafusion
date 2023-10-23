@@ -25,19 +25,18 @@ use crate::RecordBatchStream;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion_common::Result;
-use datafusion_execution::memory_pool::MemoryReservation;
 use futures::Stream;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
-use super::stream::BatchStream;
+use super::stream::BatchCursorStream;
 
 #[derive(Debug)]
 pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     in_progress: SortOrderBuilder<C>,
 
     /// The sorted input streams to merge together
-    streams: BatchStream<C>,
+    streams: BatchCursorStream<C>,
 
     /// used to record execution metrics
     metrics: BaselineMetrics,
@@ -95,12 +94,11 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 
 impl<C: CursorValues> SortPreservingMergeStream<C> {
     pub(crate) fn new(
-        streams: BatchStream<C>,
+        streams: BatchCursorStream<C>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
         batch_size: usize,
         fetch: Option<usize>,
-        reservation: MemoryReservation,
     ) -> Self {
         let stream_count = streams.partitions();
 
@@ -109,7 +107,6 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
                 schema,
                 stream_count,
                 batch_size,
-                reservation,
             ),
             streams,
             metrics,
@@ -138,8 +135,8 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         match futures::ready!(self.streams.poll_next(cx, idx)) {
             None => Poll::Ready(Ok(())),
             Some(Err(e)) => Poll::Ready(Err(e)),
-            Some(Ok((cursor_values, batch))) => {
-                Poll::Ready(self.in_progress.push_batch(idx, cursor_values, batch))
+            Some(Ok(batch_cursor)) => {
+                Poll::Ready(self.in_progress.push_batch(idx, batch_cursor))
             }
         }
     }
