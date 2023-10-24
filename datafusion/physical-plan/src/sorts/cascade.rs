@@ -84,13 +84,13 @@ use super::stream::{BatchStream, BatchTrackerStream, MergeStream};
 ///      3. [`BatchTrackerStream`] is used to collect the record batches from the leaf nodes.
 ///         * contains a single, shared use of [`BatchTracker`].
 ///         * polling of streams is non-blocking across streams/partitions.
-///      4. BatchTrackerStream yields a [`BatchCursorStream`](super::streams::BatchCursorStream)
+///      4. BatchTrackerStream yields a [`BatchCursorStream`](super::stream::BatchCursorStream)
 ///
 /// * Streams between merge nodes:
 ///      1. a single [`MergeStream`] is yielded per node.
 ///      2. TODO:
 ///         * adapter to interleave sort_order
-///         * converts a [`MergeStream`] to a [`BatchCursorStream`](super::streams::BatchCursorStream)
+///         * converts a [`MergeStream`] to a [`BatchCursorStream`](super::stream::BatchCursorStream)
 ///
 pub(crate) struct SortPreservingCascadeStream<C: CursorValues> {
     /// If the stream has encountered an error, or fetch is reached
@@ -131,11 +131,9 @@ impl<C: CursorValues + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
             schema: schema.clone(),
             cascade: Box::pin(SortPreservingMergeStream::new(
                 Box::new(streams),
-                schema,
                 metrics,
                 batch_size,
                 fetch,
-                reservation,
             )),
         }
     }

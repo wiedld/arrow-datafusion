@@ -19,12 +19,10 @@
 //! This is an order-preserving merge.
 
 use crate::metrics::BaselineMetrics;
-use crate::sorts::builder::BatchBuilder;
+use crate::sorts::builder::SortOrderBuilder;
 use crate::sorts::cursor::CursorValues;
 use crate::sorts::stream::BatchCursorStream;
-use arrow::datatypes::SchemaRef;
 use datafusion_common::Result;
-use datafusion_execution::memory_pool::MemoryReservation;
 use futures::Stream;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
@@ -33,7 +31,7 @@ use super::builder::YieldedSortOrder;
 
 #[derive(Debug)]
 pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
-    in_progress: BatchBuilder<C>,
+    in_progress: SortOrderBuilder<C>,
 
     /// The sorted input streams to merge together
     streams: BatchCursorStream<C>,
@@ -95,16 +93,14 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 impl<C: CursorValues> SortPreservingMergeStream<C> {
     pub(crate) fn new(
         streams: BatchCursorStream<C>,
-        schema: SchemaRef,
         metrics: BaselineMetrics,
         batch_size: usize,
         fetch: Option<usize>,
-        reservation: MemoryReservation,
     ) -> Self {
         let stream_count = streams.partitions();
 
         Self {
-            in_progress: BatchBuilder::new(schema, stream_count, batch_size, reservation),
+            in_progress: SortOrderBuilder::new(stream_count, batch_size),
             streams,
             metrics,
             aborted: false,

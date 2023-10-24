@@ -15,9 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow::datatypes::SchemaRef;
 use datafusion_common::Result;
-use datafusion_execution::memory_pool::MemoryReservation;
 
 use super::batches::{BatchCursor, BatchId};
 use super::cursor::CursorValues;
@@ -25,15 +23,9 @@ use super::cursor::CursorValues;
 pub type YieldedSortOrder<C> = (Vec<BatchCursor<C>>, Vec<SortOrder>);
 pub type SortOrder = (BatchId, usize); // (batch_id, row_idx)
 
-/// Provides an API to incrementally build a [`RecordBatch`] from partitioned [`RecordBatch`]
+/// Provides an API to incrementally build a [`SortOrder`] from partitioned [`RecordBatch`](arrow::record_batch::RecordBatch)es
 #[derive(Debug)]
-pub struct BatchBuilder<C: CursorValues> {
-    /// The schema of the RecordBatches yielded by this stream
-    schema: SchemaRef,
-
-    /// Accounts for memory used by buffered batches
-    reservation: MemoryReservation,
-
+pub struct SortOrderBuilder<C: CursorValues> {
     /// The current [`BatchCursor`] for each stream
     cursors: Vec<Option<BatchCursor<C>>>,
 
@@ -45,20 +37,13 @@ pub struct BatchBuilder<C: CursorValues> {
     indices: Vec<(BatchId, usize)>,
 }
 
-impl<C: CursorValues> BatchBuilder<C> {
-    /// Create a new [`BatchBuilder`] with the provided `stream_count` and `batch_size`
-    pub fn new(
-        schema: SchemaRef,
-        stream_count: usize,
-        batch_size: usize,
-        reservation: MemoryReservation,
-    ) -> Self {
+impl<C: CursorValues> SortOrderBuilder<C> {
+    /// Create a new [`SortOrderBuilder`] with the provided `stream_count` and `batch_size`
+    pub fn new(stream_count: usize, batch_size: usize) -> Self {
         Self {
-            schema,
             sorted_cursors: Vec::with_capacity(stream_count * 2),
             cursors: (0..stream_count).map(|_| None).collect(),
             indices: Vec::with_capacity(batch_size),
-            reservation,
         }
     }
 
@@ -84,19 +69,14 @@ impl<C: CursorValues> BatchBuilder<C> {
         self.indices.push((batch_cursor.batch_id(), row_idx));
     }
 
-    /// Returns the number of in-progress rows in this [`BatchBuilder`]
+    /// Returns the number of in-progress rows in this [`SortOrderBuilder`]
     pub fn len(&self) -> usize {
         self.indices.len()
     }
 
-    /// Returns `true` if this [`BatchBuilder`] contains no in-progress rows
+    /// Returns `true` if this [`SortOrderBuilder`] contains no in-progress rows
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
-    }
-
-    /// Returns the schema of this [`BatchBuilder`]
-    pub fn schema(&self) -> &SchemaRef {
-        &self.schema
     }
 
     /// Advance the cursor for `stream_idx`

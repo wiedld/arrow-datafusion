@@ -105,7 +105,6 @@ impl<T: CursorValues> Cursor<T> {
     }
 
     /// Ref to underlying [`CursorValues`]
-    #[allow(dead_code)]
     pub fn cursor_values(&self) -> &T {
         &self.values
     }

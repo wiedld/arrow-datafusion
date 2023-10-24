@@ -32,7 +32,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
-/// A fallible [`PartitionedStream`] of [`Cursor`] and [`RecordBatch`]
+/// A fallible [`PartitionedStream`] of [`CursorValues`] and [`RecordBatch`]es
 pub type BatchStream<C> = Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
 
 /// A [`PartitionedStream`] of [`BatchCursor`]s
