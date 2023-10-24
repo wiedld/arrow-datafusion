@@ -82,11 +82,6 @@ impl<C: CursorValues> BatchBuilder<C> {
         // plus an extra node at the top for the winner. Hence -1 to get winner's idx.
         let row_idx = batch_cursor.cursor.current_index() - 1;
         self.indices.push((batch_cursor.batch_id(), row_idx));
-
-        if !self.cursor_in_progress(stream_idx) {
-            let sorted = std::mem::take(&mut self.cursors[stream_idx]).expect("exists");
-            self.sorted_cursors.push(sorted);
-        }
     }
 
     /// Returns the number of in-progress rows in this [`BatchBuilder`]
@@ -111,6 +106,9 @@ impl<C: CursorValues> BatchBuilder<C> {
         match slot.as_mut() {
             Some(c) => {
                 if c.cursor.is_finished() {
+                    let sorted =
+                        std::mem::take(&mut self.cursors[stream_idx]).expect("exists");
+                    self.sorted_cursors.push(sorted);
                     return false;
                 }
                 c.cursor.advance();

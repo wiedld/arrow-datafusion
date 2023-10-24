@@ -115,6 +115,9 @@ pub struct BatchCursor<C: CursorValues> {
     /// Unique identifier of a record batch
     batch_id: BatchId,
 
+    /// For a sliced batch_cursor, where in the batch does it start.
+    offset_from_batch_start: usize,
+
     /// The cursor for the given batch.
     pub cursor: Cursor<C>,
 }
@@ -124,6 +127,7 @@ impl<C: CursorValues> BatchCursor<C> {
     pub fn new(batch_id: BatchId, cursor_values: C) -> Self {
         Self {
             batch_id,
+            offset_from_batch_start: 0,
             cursor: Cursor::new(cursor_values),
         }
     }
@@ -145,6 +149,7 @@ impl<C: CursorValues> BatchCursor<C> {
         let cursor = Cursor::new(self.cursor.cursor_values().slice(offset, length));
         Self {
             batch_id: self.batch_id,
+            offset_from_batch_start: self.offset_from_batch_start.saturating_add(offset),
             cursor,
         }
     }
@@ -152,6 +157,11 @@ impl<C: CursorValues> BatchCursor<C> {
     /// Get batch_id
     pub fn batch_id(&self) -> BatchId {
         self.batch_id
+    }
+
+    /// Used to adjust current `row_idx` from sliced BatchCursors, into absolute idx for record_batch.
+    pub fn get_offset_from_abs_idx(&self) -> usize {
+        self.offset_from_batch_start
     }
 }
 

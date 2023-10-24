@@ -154,22 +154,39 @@ impl<C: CursorValues + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
                 self.aborted = true;
                 Poll::Ready(Some(Err(e)))
             }
-            Some(Ok((_, sort_order))) => match self.build_record_batch(sort_order) {
-                Ok(batch) => Poll::Ready(Some(Ok(batch))),
-                Err(e) => {
-                    self.aborted = true;
-                    Poll::Ready(Some(Err(e)))
+            Some(Ok(yielded_sort_order)) => {
+                match self.build_record_batch(yielded_sort_order) {
+                    Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                    Err(e) => {
+                        self.aborted = true;
+                        Poll::Ready(Some(Err(e)))
+                    }
                 }
-            },
+            }
         }
     }
 
     /// Construct and yield the root node [`RecordBatch`]s.
-    fn build_record_batch(&mut self, sort_order: Vec<SortOrder>) -> Result<RecordBatch> {
+    fn build_record_batch(
+        &mut self,
+        yielded_sort_order: YieldedSortOrder<C>,
+    ) -> Result<RecordBatch> {
+        let (batch_cursors, sort_order) = yielded_sort_order;
+
         let mut batches_needed = Vec::with_capacity(sort_order.len());
         let mut batches_seen: HashMap<BatchId, (usize, usize)> =
             HashMap::with_capacity(sort_order.len()); // (batch_idx, max_row_idx)
 
+        let row_idx_offsets = batch_cursors.iter().fold(
+            HashMap::with_capacity(batch_cursors.len()),
+            |mut acc, batch_cursor| {
+                acc.insert(
+                    batch_cursor.batch_id(),
+                    batch_cursor.get_offset_from_abs_idx(),
+                );
+                acc
+            },
+        );
         let mut adjusted_sort_order = Vec::with_capacity(sort_order.len());
 
         for (batch_id, row_idx) in sort_order.iter() {
@@ -181,8 +198,9 @@ impl<C: CursorValues + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
                     batch_idx
                 }
             };
-            adjusted_sort_order.push((batch_idx, *row_idx));
-            batches_seen.insert(*batch_id, (batch_idx, *row_idx));
+            adjusted_sort_order.push((batch_idx, row_idx_offsets[batch_id] + *row_idx));
+            batches_seen
+                .insert(*batch_id, (batch_idx, row_idx_offsets[batch_id] + *row_idx));
         }
 
         let batches = self
