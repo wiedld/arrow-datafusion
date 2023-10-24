@@ -84,13 +84,13 @@ use super::stream::{BatchStream, BatchTrackerStream, MergeStream};
 ///      3. [`BatchTrackerStream`] is used to collect the record batches from the leaf nodes.
 ///         * contains a single, shared use of [`BatchTracker`].
 ///         * polling of streams is non-blocking across streams/partitions.
-///      4. BatchTrackerStream yields a [`BatchCursorStream`](super::stream::BatchCursorStream)
+///      4. BatchTrackerStream yields a [`BatchRowSetStream`](super::stream::BatchRowSetStream)
 ///
 /// * Streams between merge nodes:
 ///      1. a single [`MergeStream`] is yielded per node.
 ///      2. TODO:
 ///         * adapter to interleave sort_order
-///         * converts a [`MergeStream`] to a [`BatchCursorStream`](super::stream::BatchCursorStream)
+///         * converts a [`MergeStream`] to a [`BatchRowSetStream`](super::stream::BatchRowSetStream)
 ///
 pub(crate) struct SortPreservingCascadeStream<C: CursorValues> {
     /// If the stream has encountered an error, or fetch is reached
@@ -101,7 +101,7 @@ pub(crate) struct SortPreservingCascadeStream<C: CursorValues> {
     cascade: MergeStream<C>,
 
     /// Batches are collected on first yield from the [`BatchStream`].
-    /// Subsequent merges in cascade all refer to the [`BatchId`] using [`BatchCursor`](super::batches::BatchCursor)s.
+    /// Subsequent merges in cascade all refer to the [`BatchId`] using [`BatchRowSet`](super::batches::BatchRowSet)s.
     record_batch_collector: Arc<BatchTracker>,
 
     /// used to record execution metrics
@@ -169,19 +169,16 @@ impl<C: CursorValues + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
         &mut self,
         yielded_sort_order: YieldedSortOrder<C>,
     ) -> Result<RecordBatch> {
-        let (batch_cursors, sort_order) = yielded_sort_order;
+        let (batch_rowsets, sort_order) = yielded_sort_order;
 
         let mut batches_needed = Vec::with_capacity(sort_order.len());
         let mut batches_seen: HashMap<BatchId, (usize, usize)> =
             HashMap::with_capacity(sort_order.len()); // (batch_idx, max_row_idx)
 
-        let row_idx_offsets = batch_cursors.iter().fold(
-            HashMap::with_capacity(batch_cursors.len()),
-            |mut acc, batch_cursor| {
-                acc.insert(
-                    batch_cursor.batch_id(),
-                    batch_cursor.get_offset_from_abs_idx(),
-                );
+        let row_idx_offsets = batch_rowsets.iter().fold(
+            HashMap::with_capacity(batch_rowsets.len()),
+            |mut acc, rowset| {
+                acc.insert(rowset.batch_id(), rowset.get_offset_from_abs_idx());
                 acc
             },
         );

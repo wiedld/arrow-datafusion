@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::sorts::batches::{BatchCursor, BatchTracker};
+use crate::sorts::batches::{BatchRowSet, BatchTracker};
 use crate::sorts::builder::YieldedSortOrder;
 use crate::sorts::cursor::{ArrayValues, CursorArray, CursorValues, RowValues};
 use crate::SendableRecordBatchStream;
@@ -35,11 +35,11 @@ use std::task::{ready, Context, Poll};
 /// A fallible [`PartitionedStream`] of [`CursorValues`] and [`RecordBatch`]es
 pub type BatchStream<C> = Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
 
-/// A [`PartitionedStream`] of [`BatchCursor`]s
-pub type BatchCursorStream<C> =
-    Box<dyn PartitionedStream<Output = Result<BatchCursor<C>>>>;
+/// A [`PartitionedStream`] of [`BatchRowSet`]s
+pub type BatchRowSetStream<C> =
+    Box<dyn PartitionedStream<Output = Result<BatchRowSet<C>>>>;
 
-/// A stream of yielded [`SortOrder`](super::builder::SortOrder)s, with the corresponding [`BatchCursor`]s, is a [`MergeStream`].
+/// A stream of yielded [`SortOrder`](super::builder::SortOrder)s, with the corresponding [`BatchRowSet`]s, is a [`MergeStream`].
 ///
 /// Each merge node (a.k.a. `SortPreservingMergeStream` + `SortOrderBuilder`), will yield a [`MergeStream`].
 pub(crate) type MergeStream<C> =
@@ -224,10 +224,10 @@ impl<T: CursorArray> PartitionedStream for FieldCursorStream<T> {
     }
 }
 
-/// Converts a [`BatchStream`] to a [`BatchCursorStream`].
+/// Converts a [`BatchStream`] to a [`BatchRowSetStream`].
 ///
 /// Collects the [`RecordBatch`] per poll,
-/// and only passes along the [`BatchCursor`].
+/// and only passes along the [`BatchRowSet`].
 pub(crate) struct BatchTrackerStream<C: CursorValues> {
     // Partitioned Input stream.
     streams: BatchStream<C>,
@@ -244,7 +244,7 @@ impl<C: CursorValues> BatchTrackerStream<C> {
 }
 
 impl<C: CursorValues> PartitionedStream for BatchTrackerStream<C> {
-    type Output = Result<BatchCursor<C>>;
+    type Output = Result<BatchRowSet<C>>;
 
     fn partitions(&self) -> usize {
         self.streams.partitions()
@@ -258,7 +258,7 @@ impl<C: CursorValues> PartitionedStream for BatchTrackerStream<C> {
         Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
             r.and_then(|(cursor_values, batch)| {
                 let batch_id = self.record_batch_holder.add_batch(batch)?;
-                Ok(BatchCursor::new(batch_id, cursor_values))
+                Ok(BatchRowSet::new(batch_id, cursor_values))
             })
         }))
     }

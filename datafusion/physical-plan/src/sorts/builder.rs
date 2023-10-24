@@ -17,20 +17,20 @@
 
 use datafusion_common::Result;
 
-use super::batches::{BatchCursor, BatchId};
+use super::batches::{BatchId, BatchRowSet};
 use super::cursor::CursorValues;
 
-pub type YieldedSortOrder<C> = (Vec<BatchCursor<C>>, Vec<SortOrder>);
+pub type YieldedSortOrder<C> = (Vec<BatchRowSet<C>>, Vec<SortOrder>);
 pub type SortOrder = (BatchId, usize); // (batch_id, row_idx)
 
 /// Provides an API to incrementally build a [`SortOrder`] from partitioned [`RecordBatch`](arrow::record_batch::RecordBatch)es
 #[derive(Debug)]
 pub struct SortOrderBuilder<C: CursorValues> {
-    /// The current [`BatchCursor`] for each stream
-    cursors: Vec<Option<BatchCursor<C>>>,
+    /// The current [`BatchRowSet`] for each stream
+    active_rowsets: Vec<Option<BatchRowSet<C>>>,
 
-    /// Maintain a list of sorted [`BatchCursor`]s
-    sorted_cursors: Vec<BatchCursor<C>>,
+    /// Maintain a list of sorted [`BatchRowSet`]s
+    sorted_rowsets: Vec<BatchRowSet<C>>,
 
     /// The accumulated stream indexes from which to pull rows
     /// Consists of a tuple of `(batch_id, row_idx)`
@@ -41,32 +41,32 @@ impl<C: CursorValues> SortOrderBuilder<C> {
     /// Create a new [`SortOrderBuilder`] with the provided `stream_count` and `batch_size`
     pub fn new(stream_count: usize, batch_size: usize) -> Self {
         Self {
-            sorted_cursors: Vec::with_capacity(stream_count * 2),
-            cursors: (0..stream_count).map(|_| None).collect(),
+            sorted_rowsets: Vec::with_capacity(stream_count * 2),
+            active_rowsets: (0..stream_count).map(|_| None).collect(),
             indices: Vec::with_capacity(batch_size),
         }
     }
 
-    /// Add a new batch_cursor to the active `stream_idx`
+    /// Add a new rowset to the active `stream_idx`
     pub fn push_batch(
         &mut self,
         stream_idx: usize,
-        batch_cursor: BatchCursor<C>,
+        rowset: BatchRowSet<C>,
     ) -> Result<()> {
-        self.cursors[stream_idx] = Some(batch_cursor);
+        self.active_rowsets[stream_idx] = Some(rowset);
         Ok(())
     }
 
     /// Append the next row from `stream_idx`
     pub fn push_row(&mut self, stream_idx: usize) {
-        let batch_cursor = self.cursors[stream_idx]
+        let rowset = self.active_rowsets[stream_idx]
             .as_ref()
             .expect("push row on existing cursor");
 
         // The loser tree represents 1 node taken up by all ongoing sorts (min heap)
         // plus an extra node at the top for the winner. Hence -1 to get winner's idx.
-        let row_idx = batch_cursor.cursor.current_index() - 1;
-        self.indices.push((batch_cursor.batch_id(), row_idx));
+        let row_idx = rowset.cursor.current_index() - 1;
+        self.indices.push((rowset.batch_id(), row_idx));
     }
 
     /// Returns the number of in-progress rows in this [`SortOrderBuilder`]
@@ -82,13 +82,13 @@ impl<C: CursorValues> SortOrderBuilder<C> {
     /// Advance the cursor for `stream_idx`
     /// Return true if cursor was advanced
     pub fn advance_cursor(&mut self, stream_idx: usize) -> bool {
-        let slot = &mut self.cursors[stream_idx];
+        let slot = &mut self.active_rowsets[stream_idx];
         match slot.as_mut() {
             Some(c) => {
                 if c.cursor.is_finished() {
-                    let sorted =
-                        std::mem::take(&mut self.cursors[stream_idx]).expect("exists");
-                    self.sorted_cursors.push(sorted);
+                    let sorted = std::mem::take(&mut self.active_rowsets[stream_idx])
+                        .expect("exists");
+                    self.sorted_rowsets.push(sorted);
                     return false;
                 }
                 c.cursor.advance();
@@ -101,7 +101,10 @@ impl<C: CursorValues> SortOrderBuilder<C> {
     /// Returns `true` if the cursor at index `a` is greater than at index `b`
     #[inline]
     pub fn is_gt(&self, stream_a: usize, stream_b: usize) -> bool {
-        match (&self.cursors[stream_a], &self.cursors[stream_b]) {
+        match (
+            &self.active_rowsets[stream_a],
+            &self.active_rowsets[stream_b],
+        ) {
             (None, _) => true,
             (_, None) => false,
             (Some(ac), Some(bc)) => ac
@@ -114,15 +117,15 @@ impl<C: CursorValues> SortOrderBuilder<C> {
 
     /// Returns true if there is an in-progress cursor for a given stream
     pub fn cursor_in_progress(&mut self, stream_idx: usize) -> bool {
-        self.cursors[stream_idx]
+        self.active_rowsets[stream_idx]
             .as_ref()
             .map_or(false, |cursor| !cursor.cursor.is_finished())
     }
 
-    /// Yields a sort_order and the sliced [`BatchCursor`]s
+    /// Yields a sort_order and the sliced [`BatchRowSet`]s
     /// representing (in total) up to N batch size.
     ///
-    ///         BatchCursors
+    ///         BatchRowSets
     /// ┌────────────────────────┐
     /// │    Cursor     BatchId  │
     /// │ ┌──────────┐ ┌───────┐ │
@@ -146,46 +149,46 @@ impl<C: CursorValues> SortOrderBuilder<C> {
         }
 
         let sort_order = std::mem::take(&mut self.indices);
-        let mut cursors_to_yield: Vec<BatchCursor<C>> =
-            Vec::with_capacity(self.cursors.capacity());
+        let mut rowsets_to_yield: Vec<BatchRowSet<C>> =
+            Vec::with_capacity(self.active_rowsets.capacity());
 
         // drain already complete sorted_batches
-        for mut batch_cursor in std::mem::take(&mut self.sorted_cursors) {
-            batch_cursor.reset();
-            cursors_to_yield.push(batch_cursor);
+        for mut rowset in std::mem::take(&mut self.sorted_rowsets) {
+            rowset.reset();
+            rowsets_to_yield.push(rowset);
         }
 
         // divide: (1) to_yield, (2) to_retain, (3) to_split any in progress cursors
-        for stream_idx in 0..self.cursors.len() {
-            let mut batch_cursor = match self.cursors[stream_idx].take() {
+        for stream_idx in 0..self.active_rowsets.len() {
+            let mut rowset = match self.active_rowsets[stream_idx].take() {
                 Some(c) => c,
                 None => continue,
             };
 
-            if batch_cursor.cursor.is_finished() {
+            if rowset.cursor.is_finished() {
                 // yield all
-                batch_cursor.reset();
-                cursors_to_yield.push(batch_cursor);
-            } else if batch_cursor.in_progress() {
+                rowset.reset();
+                rowsets_to_yield.push(rowset);
+            } else if rowset.in_progress() {
                 // split
 
                 // current_idx is in the loser tree
                 // max pushed row_idx is current_idx -1
-                let current_idx = batch_cursor.cursor.current_index();
+                let current_idx = rowset.cursor.current_index();
 
-                let to_yield = batch_cursor.slice(0, current_idx);
-                let to_retain = batch_cursor.slice(
+                let to_yield = rowset.slice(0, current_idx);
+                let to_retain = rowset.slice(
                     current_idx,
-                    batch_cursor.cursor.cursor_values().len() - current_idx,
+                    rowset.cursor.cursor_values().len() - current_idx,
                 );
-                cursors_to_yield.push(to_yield);
-                self.cursors[stream_idx] = Some(to_retain);
+                rowsets_to_yield.push(to_yield);
+                self.active_rowsets[stream_idx] = Some(to_retain);
             } else {
                 // retain all
-                self.cursors[stream_idx] = Some(batch_cursor);
+                self.active_rowsets[stream_idx] = Some(rowset);
             }
         }
 
-        Ok(Some((cursors_to_yield, sort_order)))
+        Ok(Some((rowsets_to_yield, sort_order)))
     }
 }

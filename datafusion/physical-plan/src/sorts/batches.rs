@@ -32,7 +32,7 @@ use super::cursor::{Cursor, CursorValues};
 /// passable and sliceable through multiple merge nodes
 /// in a cascaded merge tree.
 ///
-/// A `BatchCursor` encapsulates the ability to sort merge each
+/// A `BatchRowSet` encapsulates the ability to sort merge each
 /// sliced portition of a record batch, with minimal overhead.
 ///
 /// ```text
@@ -47,7 +47,7 @@ use super::cursor::{Cursor, CursorValues};
 ///             │
 ///             │
 ///             ▼
-///        BatchCursors
+///        BatchRowSets
 /// ┌────────────────────────┐           ┌──────────────────────┐ ─ ▶ push batch
 /// │    Cursor     BatchId  │    ─ ─ ─ ▶│   LoserTree (Merge)  │ ─ ▶ advance cursor
 /// │ ┌──────────┐ ┌───────┐ │   │       └──────────────────────┘ ─ ▶ push row
@@ -60,7 +60,7 @@ use super::cursor::{Cursor, CursorValues};
 ///              ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
 ///             │
 ///             ▼
-///        BatchCursors
+///        BatchRowSets
 /// ┌────────────────────────┐
 /// │    Cursor     BatchId  │           ┌──────────────────────┐
 /// │ ┌──────────┐ ┌───────┐ │    ─ ─ ─ ▶│   LoserTree (Merge)  │
@@ -79,7 +79,7 @@ use super::cursor::{Cursor, CursorValues};
 ///             │
 ///         Mirror of above.
 ///  LoserTree (Merge) & SortOrderBuilder
-///       yielding BatchCursors
+///       yielding BatchRowSets
 ///  which represents partial batches
 /// ```
 ///
@@ -111,23 +111,23 @@ use super::cursor::{Cursor, CursorValues};
 /// ```
 ///
 #[derive(Debug)]
-pub struct BatchCursor<C: CursorValues> {
+pub struct BatchRowSet<C: CursorValues> {
     /// Unique identifier of a record batch
     batch_id: BatchId,
 
-    /// For a sliced batch_cursor, where in the batch does it start.
-    offset_from_batch_start: usize,
+    /// For a sliced cursor, where in the batch does it start.
+    cursor_offset_from_batch_start: usize,
 
     /// The cursor for the given batch.
     pub cursor: Cursor<C>,
 }
 
-impl<C: CursorValues> BatchCursor<C> {
-    /// Create a new [`BatchCursor`] from [`CursorValues`] and a [`BatchId`].
+impl<C: CursorValues> BatchRowSet<C> {
+    /// Create a new [`BatchRowSet`] from [`CursorValues`] and a [`BatchId`].
     pub fn new(batch_id: BatchId, cursor_values: C) -> Self {
         Self {
             batch_id,
-            offset_from_batch_start: 0,
+            cursor_offset_from_batch_start: 0,
             cursor: Cursor::new(cursor_values),
         }
     }
@@ -149,7 +149,9 @@ impl<C: CursorValues> BatchCursor<C> {
         let cursor = Cursor::new(self.cursor.cursor_values().slice(offset, length));
         Self {
             batch_id: self.batch_id,
-            offset_from_batch_start: self.offset_from_batch_start.saturating_add(offset),
+            cursor_offset_from_batch_start: self
+                .cursor_offset_from_batch_start
+                .saturating_add(offset),
             cursor,
         }
     }
@@ -159,9 +161,9 @@ impl<C: CursorValues> BatchCursor<C> {
         self.batch_id
     }
 
-    /// Used to adjust current `row_idx` from sliced BatchCursors, into absolute idx for record_batch.
+    /// Used to adjust current `row_idx` from sliced BatchRowSets, into absolute idx for record_batch.
     pub fn get_offset_from_abs_idx(&self) -> usize {
-        self.offset_from_batch_start
+        self.cursor_offset_from_batch_start
     }
 }
 

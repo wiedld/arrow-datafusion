@@ -21,7 +21,7 @@
 use crate::metrics::BaselineMetrics;
 use crate::sorts::builder::SortOrderBuilder;
 use crate::sorts::cursor::CursorValues;
-use crate::sorts::stream::BatchCursorStream;
+use crate::sorts::stream::BatchRowSetStream;
 use datafusion_common::Result;
 use futures::Stream;
 use std::pin::Pin;
@@ -34,7 +34,7 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     in_progress: SortOrderBuilder<C>,
 
     /// The sorted input streams to merge together
-    streams: BatchCursorStream<C>,
+    streams: BatchRowSetStream<C>,
 
     /// used to record execution metrics
     metrics: BaselineMetrics,
@@ -92,7 +92,7 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 
 impl<C: CursorValues> SortPreservingMergeStream<C> {
     pub(crate) fn new(
-        streams: BatchCursorStream<C>,
+        streams: BatchRowSetStream<C>,
         metrics: BaselineMetrics,
         batch_size: usize,
         fetch: Option<usize>,
@@ -128,8 +128,8 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         match futures::ready!(self.streams.poll_next(cx, idx)) {
             None => Poll::Ready(Ok(())),
             Some(Err(e)) => Poll::Ready(Err(e)),
-            Some(Ok(batch_cursor)) => {
-                Poll::Ready(self.in_progress.push_batch(idx, batch_cursor))
+            Some(Ok(batch_rowset)) => {
+                Poll::Ready(self.in_progress.push_batch(idx, batch_rowset))
             }
         }
     }
