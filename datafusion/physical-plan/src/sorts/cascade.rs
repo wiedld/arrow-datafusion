@@ -92,6 +92,43 @@ use super::stream::{BatchStream, BatchTrackerStream, MergeStream};
 ///         * adapter to interleave sort_order
 ///         * converts a [`MergeStream`] to a [`BatchRowSetStream`](super::stream::BatchRowSetStream)
 ///
+///
+/// Together, these streams make for a composable tree of merge nodes:
+/// ```text
+///
+/// ┌─────────────────────────────────┐
+/// │         BatchStream             │
+/// │ ┌────────────┐ ┌──────────────┐ │
+/// │ │CursorValues│ │ RecordBatches│ │
+/// │ └────────────┘ └──────────────┘ │
+/// └─────────────────────────────────┘
+///                 │
+///          BatchTrackerStream
+///                 │
+///                 ▼
+/// ┌────────────────────────────────────────┐
+/// │           BatchRowSetStream            │ <─ ─ ─ ─ ─ ─ ─ ┐
+/// │ ┌────────┐ ┌─────────┐ ┌─────────────┐ │                |
+/// │ │ Cursor │ │ BatchId │ │ BatchOffset │ │                |
+/// │ └────────┘ └─────────┘ └─────────────┘ │                |
+/// └────────────────────────────────────────┘                |
+///                 │                                         |
+///    SortPreservingMergeStream (a.k.a. merge node)          |
+///                 │                                         |
+///                 ▼                                         |
+/// ┌───────────────────────────────────────────────┐         |
+/// │           MergeStream                         │         |
+/// │ ┌─────────────────────────────┐ ┌───────────┐ │         |
+/// │ │        BatchRowSet          │ │ SortOrder │ │         |
+/// │ │ (Cursor/BatchId/BatchOffset)│ │           │ │         |
+/// │ └─────────────────────────────┘ └───────────┘ │         |
+/// └───────────────────────────────────────────────┘         |
+///                 │                                         |
+///        RowsetInterleaveAdaptor (TODO)                     |
+///                 |                                         |
+///                 └─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+///
+///  ```
 pub(crate) struct SortPreservingCascadeStream<C: CursorValues> {
     /// If the stream has encountered an error, or fetch is reached
     aborted: bool,
