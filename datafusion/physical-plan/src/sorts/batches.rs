@@ -81,34 +81,6 @@ use super::cursor::{Cursor, CursorValues};
 ///  LoserTree (Merge) & SortOrderBuilder
 ///       yielding BatchRowSets
 ///  which represents partial batches
-/// ```
-///
-///
-/// Final merge at CascadedMerge root:
-/// ```text
-///
-///         SortOrder
-/// ┌───────────────────────────┐
-/// | (B,11) (F,101) (A,1) ...  ┼ ─ ─ ─ ─ ─ ─ ─ ─ ─
-/// └───────────────────────────┘                  |
-///                                                |
-///        BatchTracker                            |
-/// ┌────────────────────────┐                     |
-/// │    Batch      BatchId  │           ┌─────────▼────────────┐
-/// │ ┌──────────┐ ┌───────┐ │    ─ ─ ─ ▶│   CascadedMerge root │
-/// │ │  <data>  │ │   A   │ ┼ ─ │       │         |            │
-/// │ ├──────────┤ ├───────┤ │   │       |         ▼            |
-/// │ │  <data>  │ │   B   │ ┼ ─ │       │     interleave       |
-/// │ └──────────┘ └───────┘ │   │       └─────────|────────────┘
-/// │     ...         ...    │   │                 |
-/// │ ┌──────────┐ ┌───────┐ │   │                 ▼
-/// │ │  <data>  │ │   F   │ ┼ ─ │          batch up to N rows
-/// │ ├──────────┤ ├───────┤ │   │
-/// │ │  <data>  │ │   G   │ ┼ ─ ┘
-/// │ └──────────┘ └───────┘ │
-/// └────────────────────────┘
-///
-/// ```
 ///
 #[derive(Debug)]
 pub struct BatchRowSet<C: CursorValues> {
