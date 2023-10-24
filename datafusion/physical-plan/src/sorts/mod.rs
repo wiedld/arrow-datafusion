@@ -19,6 +19,7 @@
 
 mod batches;
 mod builder;
+mod cascade;
 mod cursor;
 mod index;
 mod merge;

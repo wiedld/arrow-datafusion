@@ -16,6 +16,7 @@
 // under the License.
 
 use crate::sorts::batches::{BatchCursor, BatchTracker};
+use crate::sorts::builder::YieldedSortOrder;
 use crate::sorts::cursor::{ArrayValues, CursorArray, CursorValues, RowValues};
 use crate::SendableRecordBatchStream;
 use crate::{PhysicalExpr, PhysicalSortExpr};
@@ -27,14 +28,22 @@ use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 use futures::stream::{Fuse, StreamExt};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 /// A fallible [`PartitionedStream`] of [`Cursor`] and [`RecordBatch`]
-type BatchStream<C> = Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
+pub type BatchStream<C> = Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
 
 /// A [`PartitionedStream`] of [`BatchCursor`]s
-type BatchCursorStream<C> = Box<dyn PartitionedStream<Output = Result<BatchCursor<C>>>>;
+pub type BatchCursorStream<C> =
+    Box<dyn PartitionedStream<Output = Result<BatchCursor<C>>>>;
+
+/// A stream of yielded [`SortOrder`](super::builder::SortOrder)s, with the corresponding [`BatchCursor`]s, is a [`MergeStream`].
+///
+/// Each merge node (a.k.a. `SortPreservingMergeStream` + `SortOrderBuilder`), will yield a [`MergeStream`].
+pub(crate) type MergeStream<C> =
+    Pin<Box<dyn futures::Stream<Item = Result<YieldedSortOrder<C>>> + Send>>;
 
 /// A [`Stream`](futures::Stream) that has multiple partitions that can
 /// be polled separately but not concurrently

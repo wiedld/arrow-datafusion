@@ -128,6 +128,11 @@ impl<C: CursorValues> BatchCursor<C> {
         }
     }
 
+    /// Cursor is in progress
+    pub fn in_progress(&self) -> bool {
+        self.cursor.current_index() > 0 && !self.cursor.is_finished()
+    }
+
     /// Reset for next merge node
     pub fn reset(&mut self) {
         let cursor_values = self.cursor.cursor_values();
