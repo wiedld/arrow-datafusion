@@ -109,6 +109,11 @@ impl<T: CursorValues> Cursor<T> {
     pub fn cursor_values(&self) -> &T {
         &self.values
     }
+
+    /// Current cursor idx position
+    pub fn current_index(&self) -> usize {
+        self.offset
+    }
 }
 
 impl<T: CursorValues> PartialEq for Cursor<T> {

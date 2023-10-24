@@ -16,7 +16,7 @@
 // under the License.
 
 use crate::sorts::batches::{BatchCursor, BatchTracker};
-use crate::sorts::cursor::{ArrayValues, Cursor, CursorArray, CursorValues, RowValues};
+use crate::sorts::cursor::{ArrayValues, CursorArray, CursorValues, RowValues};
 use crate::SendableRecordBatchStream;
 use crate::{PhysicalExpr, PhysicalSortExpr};
 use arrow::array::Array;

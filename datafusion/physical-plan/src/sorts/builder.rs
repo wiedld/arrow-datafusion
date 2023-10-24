@@ -21,17 +21,30 @@ use arrow::record_batch::RecordBatch;
 use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 
-#[derive(Debug, Copy, Clone, Default)]
-struct BatchCursor {
+use super::cursor::{Cursor, CursorValues};
+
+/// TODO: this is the old/existing BatchCursor, which will be replaced shortly.
+#[derive(Debug)]
+struct BatchCursor<C: CursorValues> {
     /// The index into BatchBuilder::batches
     batch_idx: usize,
-    /// The row index within the given batch
-    row_idx: usize,
+
+    /// temporary field, to use cursor
+    cursor: Option<Cursor<C>>,
+}
+
+impl<C: CursorValues> Default for BatchCursor<C> {
+    fn default() -> Self {
+        Self {
+            batch_idx: 0,
+            cursor: None,
+        }
+    }
 }
 
 /// Provides an API to incrementally build a [`RecordBatch`] from partitioned [`RecordBatch`]
 #[derive(Debug)]
-pub struct BatchBuilder {
+pub struct BatchBuilder<C: CursorValues> {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
 
@@ -42,14 +55,14 @@ pub struct BatchBuilder {
     reservation: MemoryReservation,
 
     /// The current [`BatchCursor`] for each stream
-    cursors: Vec<BatchCursor>,
+    cursors: Vec<BatchCursor<C>>,
 
     /// The accumulated stream indexes from which to pull rows
     /// Consists of a tuple of `(batch_idx, row_idx)`
     indices: Vec<(usize, usize)>,
 }
 
-impl BatchBuilder {
+impl<C: CursorValues> BatchBuilder<C> {
     /// Create a new [`BatchBuilder`] with the provided `stream_count` and `batch_size`
     pub fn new(
         schema: SchemaRef,
@@ -60,30 +73,42 @@ impl BatchBuilder {
         Self {
             schema,
             batches: Vec::with_capacity(stream_count * 2),
-            cursors: vec![BatchCursor::default(); stream_count],
+            cursors: (0..stream_count).map(|_| BatchCursor::default()).collect(),
             indices: Vec::with_capacity(batch_size),
             reservation,
         }
     }
 
     /// Append a new batch in `stream_idx`
-    pub fn push_batch(&mut self, stream_idx: usize, batch: RecordBatch) -> Result<()> {
+    pub fn push_batch(
+        &mut self,
+        stream_idx: usize,
+        batch: RecordBatch,
+        cursor: Cursor<C>,
+    ) -> Result<()> {
         self.reservation.try_grow(batch.get_array_memory_size())?;
         let batch_idx = self.batches.len();
         self.batches.push((stream_idx, batch));
         self.cursors[stream_idx] = BatchCursor {
             batch_idx,
-            row_idx: 0,
+            cursor: Some(cursor),
         };
         Ok(())
     }
 
     /// Append the next row from `stream_idx`
     pub fn push_row(&mut self, stream_idx: usize) {
-        let cursor = &mut self.cursors[stream_idx];
-        let row_idx = cursor.row_idx;
-        cursor.row_idx += 1;
-        self.indices.push((cursor.batch_idx, row_idx));
+        let batch_cursor = &self.cursors[stream_idx];
+
+        // The loser tree represents 1 node taken up by all ongoing sorts (min heap)
+        // plus an extra node at the top for the winner. Hence -1 to get winner's idx.
+        let row_idx = batch_cursor
+            .cursor
+            .as_ref()
+            .expect("push row on existing cursor")
+            .current_index()
+            - 1;
+        self.indices.push((batch_cursor.batch_idx, row_idx));
     }
 
     /// Returns the number of in-progress rows in this [`BatchBuilder`]
@@ -99,6 +124,45 @@ impl BatchBuilder {
     /// Returns the schema of this [`BatchBuilder`]
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
+    }
+
+    /// Advance the cursor for `stream_idx`
+    /// Return true if cursor was advanced
+    pub fn advance_cursor(&mut self, stream_idx: usize) -> bool {
+        let slot = &mut self.cursors[stream_idx].cursor;
+        match slot.as_mut() {
+            Some(c) => {
+                if c.is_finished() {
+                    return false;
+                }
+                c.advance();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Returns `true` if the cursor at index `a` is greater than at index `b`
+    #[inline]
+    pub fn is_gt(&self, stream_a: usize, stream_b: usize) -> bool {
+        match (
+            &self.cursors[stream_a].cursor,
+            &self.cursors[stream_b].cursor,
+        ) {
+            (None, _) => true,
+            (_, None) => false,
+            (Some(ac), Some(bc)) => {
+                ac.cmp(bc).then_with(|| stream_a.cmp(&stream_b)).is_gt()
+            }
+        }
+    }
+
+    /// Returns true if there is an in-progress cursor for a given stream
+    pub fn cursor_in_progress(&mut self, stream_idx: usize) -> bool {
+        self.cursors[stream_idx]
+            .cursor
+            .as_ref()
+            .map_or(false, |cursor| !cursor.is_finished())
     }
 
     /// Drains the in_progress row indexes, and builds a new RecordBatch from them
