@@ -112,7 +112,9 @@ impl<C: CursorValues> BatchRowSet<C> {
     /// Reset for next merge node
     pub fn reset(&mut self) {
         let cursor_values = self.cursor.cursor_values();
-        let cursor_values = cursor_values.slice(0, cursor_values.len());
+        let windowed_start_idx = 0;
+        let windowed_end_idx = self.cursor.current_index();
+        let cursor_values = cursor_values.slice(windowed_start_idx, windowed_end_idx);
         std::mem::swap(&mut self.cursor, &mut Cursor::new(cursor_values));
     }
 

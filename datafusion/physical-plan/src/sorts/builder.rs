@@ -67,6 +67,12 @@ impl<C: CursorValues> SortOrderBuilder<C> {
         // plus an extra node at the top for the winner. Hence -1 to get winner's idx.
         let row_idx = rowset.cursor.current_index() - 1;
         self.indices.push((rowset.batch_id(), row_idx));
+
+        if rowset.cursor.is_finished() {
+            let sorted = std::mem::take(&mut self.active_rowsets[stream_idx])
+                .expect("should still exist");
+            self.sorted_rowsets.push(sorted);
+        }
     }
 
     /// Returns the number of in-progress rows in this [`SortOrderBuilder`]
@@ -86,9 +92,6 @@ impl<C: CursorValues> SortOrderBuilder<C> {
         match slot.as_mut() {
             Some(c) => {
                 if c.cursor.is_finished() {
-                    let sorted = std::mem::take(&mut self.active_rowsets[stream_idx])
-                        .expect("exists");
-                    self.sorted_rowsets.push(sorted);
                     return false;
                 }
                 c.cursor.advance();
