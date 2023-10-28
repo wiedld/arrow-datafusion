@@ -15,16 +15,23 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use ahash::RandomState;
 use arrow::compute::interleave;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 
+use std::collections::{HashMap, hash_map::Entry};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
 #[derive(Debug, Copy, Clone, Default)]
 struct BatchCursor {
     /// The index into BatchBuilder::batches
-    batch_idx: usize,
+    batch_id: u64,
     /// The row index within the given batch
     row_idx: usize,
 }
@@ -35,9 +42,6 @@ pub struct BatchBuilder {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
 
-    /// Maintain a list of [`RecordBatch`] and their corresponding stream
-    batches: Vec<(usize, RecordBatch)>,
-
     /// Accounts for memory used by buffered batches
     reservation: MemoryReservation,
 
@@ -45,8 +49,14 @@ pub struct BatchBuilder {
     cursors: Vec<BatchCursor>,
 
     /// The accumulated stream indexes from which to pull rows
-    /// Consists of a tuple of `(batch_idx, row_idx)`
-    indices: Vec<(usize, usize)>,
+    /// Consists of a tuple of `(batch_id, row_idx)`
+    indices: Vec<(u64, usize)>,
+
+    /// Monotonically increasing batch id
+    monotonic_counter: AtomicU64,
+
+    /// Hold in hashmap, avoiding the Vec::retain.
+    batches: HashMap<u64, Arc<RecordBatch>, RandomState>,
 }
 
 impl BatchBuilder {
@@ -59,7 +69,8 @@ impl BatchBuilder {
     ) -> Self {
         Self {
             schema,
-            batches: Vec::with_capacity(stream_count * 2),
+            monotonic_counter: AtomicU64::new(0),
+            batches: HashMap::with_hasher(RandomState::new()),
             cursors: vec![BatchCursor::default(); stream_count],
             indices: Vec::with_capacity(batch_size),
             reservation,
@@ -69,10 +80,10 @@ impl BatchBuilder {
     /// Append a new batch in `stream_idx`
     pub fn push_batch(&mut self, stream_idx: usize, batch: RecordBatch) -> Result<()> {
         self.reservation.try_grow(batch.get_array_memory_size())?;
-        let batch_idx = self.batches.len();
-        self.batches.push((stream_idx, batch));
+        let batch_id = self.monotonic_counter.fetch_add(1, Ordering::Relaxed);
+        self.batches.insert(batch_id, Arc::new(batch));
         self.cursors[stream_idx] = BatchCursor {
-            batch_idx,
+            batch_id,
             row_idx: 0,
         };
         Ok(())
@@ -83,7 +94,7 @@ impl BatchBuilder {
         let cursor = &mut self.cursors[stream_idx];
         let row_idx = cursor.row_idx;
         cursor.row_idx += 1;
-        self.indices.push((cursor.batch_idx, row_idx));
+        self.indices.push((cursor.batch_id, row_idx));
     }
 
     /// Returns the number of in-progress rows in this [`BatchBuilder`]
@@ -111,39 +122,47 @@ impl BatchBuilder {
             return Ok(None);
         }
 
+        let mut batches_to_interleave = Vec::with_capacity(self.indices.len());
+        let mut batches_seen: HashMap<u64, (usize, usize)> =
+            HashMap::with_capacity(self.indices.len()); // (batch_idx, max_row_idx)
+
+        let mut adjusted_indices = Vec::with_capacity(self.indices.len());
+
+        for (batch_id, row_idx) in self.indices.iter() {
+            let batch_idx = match batches_seen.entry(*batch_id) {
+                Entry::Occupied(entry) => entry.get().0,
+                Entry::Vacant(entry) => {
+                    let batch_idx = batches_to_interleave.len();
+                    batches_to_interleave
+                        .push(self.batches.get(batch_id).expect("should exist").clone());
+                    entry.insert((batch_idx, *row_idx));
+                    batch_idx
+                }
+            };
+            adjusted_indices.push((batch_idx, *row_idx));
+        }
+
         let columns = (0..self.schema.fields.len())
             .map(|column_idx| {
-                let arrays: Vec<_> = self
-                    .batches
+                let arrays: Vec<_> = batches_to_interleave
                     .iter()
-                    .map(|(_, batch)| batch.column(column_idx).as_ref())
+                    .map(|batch| batch.column(column_idx).as_ref())
                     .collect();
-                Ok(interleave(&arrays, &self.indices)?)
+                Ok(interleave(&arrays, adjusted_indices.as_slice())?)
             })
             .collect::<Result<Vec<_>>>()?;
 
         self.indices.clear();
 
-        // New cursors are only created once the previous cursor for the stream
-        // is finished. This means all remaining rows from all but the last batch
-        // for each stream have been yielded to the newly created record batch
-        //
-        // We can therefore drop all but the last batch for each stream
-        let mut batch_idx = 0;
-        let mut retained = 0;
-        self.batches.retain(|(stream_idx, batch)| {
-            let stream_cursor = &mut self.cursors[*stream_idx];
-            let retain = stream_cursor.batch_idx == batch_idx;
-            batch_idx += 1;
-
-            if retain {
-                stream_cursor.batch_idx = retained;
-                retained += 1;
-            } else {
-                self.reservation.shrink(batch.get_array_memory_size());
+        // Drop all fully consumed batches
+        for (batch_id, (_, max_row_idx)) in batches_seen.iter() {
+            let batch = self.batches.get(batch_id).expect("should exist");
+            if batch.num_rows() == max_row_idx + 1 {
+                let free_bytes = batch.get_array_memory_size();
+                self.batches.remove(batch_id);
+                self.reservation.shrink(free_bytes);
             }
-            retain
-        });
+        }
 
         Ok(Some(RecordBatch::try_new(self.schema.clone(), columns)?))
     }
