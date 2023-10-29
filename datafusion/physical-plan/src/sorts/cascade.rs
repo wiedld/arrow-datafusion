@@ -17,14 +17,15 @@
 
 use crate::metrics::BaselineMetrics;
 use crate::sorts::cursor::CursorValues;
+use crate::stream::ReceiverStreamBuilder;
 use crate::RecordBatchStream;
 use arrow::compute::interleave;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
-use futures::Stream;
-use std::collections::{hash_map::Entry, HashMap};
+use futures::{Stream, StreamExt};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 use std::marker::Send;
 use std::task::{ready, Context, Poll};
 use std::{pin::Pin, sync::Arc};
@@ -32,7 +33,11 @@ use std::{pin::Pin, sync::Arc};
 use super::batches::{BatchId, BatchTracker};
 use super::builder::YieldedSortOrder;
 use super::merge::SortPreservingMergeStream;
-use super::stream::{BatchStream, BatchTrackerStream, MergeStream};
+use super::stream::{
+    BatchStream, BatchTrackerStream, InterleaveMergeStream, MergeStream,
+};
+
+static MAX_STREAMS_PER_MERGE: usize = 10;
 
 /// Sort preserving cascade stream
 ///
@@ -79,8 +84,8 @@ use super::stream::{BatchStream, BatchTrackerStream, MergeStream};
 ///      1. [`BatchStream`] yields the initial cursors and batches. (e.g. a RowCursorStream)
 ///         * This initial stream is for a number of partitions (e.g. 100).
 ///         * only a single BatchStream.
-///      2. TODO:
-///         * split the single stream, across multiple leaf nodes.
+///      2. `BatchStream::take_partitions` allows leave nodes to `mem::take` a subset of partitions.
+///         * This splits the single stream, across multiple leaf nodes.
 ///      3. [`BatchTrackerStream`] is used to collect the record batches from the leaf nodes.
 ///         * contains a single, shared use of [`BatchTracker`].
 ///         * polling of streams is non-blocking across streams/partitions.
@@ -88,9 +93,22 @@ use super::stream::{BatchStream, BatchTrackerStream, MergeStream};
 ///
 /// * Streams between merge nodes:
 ///      1. a single [`MergeStream`] is yielded per node.
-///      2. TODO:
-///         * adapter to interleave sort_order
+///      2. [`InterleaveMergeStream`] is used in non-root nodes.
 ///         * converts a [`MergeStream`] to a [`BatchRowSetStream`](super::stream::BatchRowSetStream)
+///         * the MergeStream has [`BatchRowSet`](super::batches::BatchRowSet)s sliced to what was yielded with a sort_order.
+///             * sort_order = ((batch_0, row_0), (batch_0, row_1), (batch_1, row_0), (batch_0, row_2), ...)
+///             * sliced batch_0 from rows 0-2.
+///         * BatchRowSetStream provide the next merge node the ordered [`BatchRowSet`](super::batches::BatchRowSet)s
+///             * poll yields ((batch_0, row_0), (batch_0, row_1))
+///             * poll yields ((batch_1, row_0))
+///             * poll yields ((batch_0, row_2), ...)
+///      3. next merge node consumes [`BatchRowSetStream`](super::stream::BatchRowSetStream)
+///  
+/// * For the last merge node;
+///      1. skip the additional interleaving ([`InterleaveMergeStream`])
+///      2. perform the `arrow::compute::interleave` and yield the record batch
+///             
+///
 ///
 ///
 /// Together, these streams make for a composable tree of merge nodes:
@@ -107,26 +125,32 @@ use super::stream::{BatchStream, BatchTrackerStream, MergeStream};
 ///                 │
 ///                 ▼
 /// ┌────────────────────────────────────────┐
-/// │           BatchRowSetStream            │ <─ ─ ─ ─ ─ ─ ─ ┐
-/// │ ┌────────┐ ┌─────────┐ ┌─────────────┐ │                |
-/// │ │ Cursor │ │ BatchId │ │ BatchOffset │ │                |
-/// │ └────────┘ └─────────┘ └─────────────┘ │                |
-/// └────────────────────────────────────────┘                |
-///                 │                                         |
-///    SortPreservingMergeStream (a.k.a. merge node)          |
-///                 │                                         |
-///                 ▼                                         |
-/// ┌───────────────────────────────────────────────┐         |
-/// │           MergeStream                         │         |
-/// │ ┌─────────────────────────────┐ ┌───────────┐ │         |
-/// │ │        BatchRowSet          │ │ SortOrder │ │         |
-/// │ │ (Cursor/BatchId/BatchOffset)│ │           │ │         |
-/// │ └─────────────────────────────┘ └───────────┘ │         |
-/// └───────────────────────────────────────────────┘         |
-///                 │                                         |
-///        RowsetInterleaveAdaptor (TODO)                     |
-///                 |                                         |
-///                 └─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┘
+/// │           BatchRowSetStream            │ <─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+/// │ ┌────────┐ ┌─────────┐ ┌─────────────┐ │                            |
+/// │ │ Cursor │ │ BatchId │ │ BatchOffset │ │                            |
+/// │ └────────┘ └─────────┘ └─────────────┘ │                            |
+/// └────────────────────────────────────────┘                            |
+///                 │                                                     |
+///    SortPreservingMergeStream (a.k.a. merge node)                      |
+///                 │                                                     |
+///                 ▼                                            InterleaveMergeStream
+/// ┌───────────────────────────────────────────────┐                     |
+/// │           MergeStream                         │                     |
+/// │ ┌─────────────────────────────┐ ┌───────────┐ │                     |
+/// │ │        BatchRowSet          │ │ SortOrder │ │                     |
+/// │ │ (Cursor/BatchId/BatchOffset)│ │           │ │                     |
+/// │ └─────────────────────────────┘ └───────────┘ │                     |
+/// └───────────────────────────────────────────────┘                     |
+///             /               \                                         |
+///        Root Node       Non-root node                                  |
+///            |                |                                         |
+///            |                └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+///            |
+///            ▼
+///   `arrow::compute::interleave`
+///            |
+///            ▼
+///       RecordBatch
 ///
 ///  ```
 pub(crate) struct SortPreservingCascadeStream<C: CursorValues> {
@@ -149,29 +173,77 @@ pub(crate) struct SortPreservingCascadeStream<C: CursorValues> {
 }
 
 impl<C: CursorValues + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
-    pub(crate) fn new(
-        streams: BatchStream<C>,
+    pub(crate) fn new<S: BatchStream<C, Output = Result<(C, RecordBatch)>>>(
+        mut streams: S,
         schema: SchemaRef,
         metrics: BaselineMetrics,
         batch_size: usize,
         fetch: Option<usize>,
         reservation: MemoryReservation,
     ) -> Self {
+        let stream_count = streams.partitions();
         let batch_tracker = Arc::new(BatchTracker::new(reservation.new_empty()));
 
-        let streams = BatchTrackerStream::new(streams, batch_tracker.clone());
+        let max_streams_per_merge = MAX_STREAMS_PER_MERGE;
+        let mut divided_streams: VecDeque<MergeStream<C>> =
+            VecDeque::with_capacity(stream_count / max_streams_per_merge + 1);
+
+        // build leaves
+        for stream_idx in (0..stream_count).step_by(max_streams_per_merge) {
+            let limit = std::cmp::min(max_streams_per_merge, stream_count - stream_idx);
+
+            // divide the BatchCursorStream across multiple leafnode merges.
+            let streams = BatchTrackerStream::new(
+                streams.take_partitions(0..limit),
+                batch_tracker.clone(),
+            );
+
+            divided_streams.push_back(spawn_buffered_merge(
+                Box::pin(SortPreservingMergeStream::new(
+                    Box::new(streams),
+                    metrics.clone(),
+                    batch_size,
+                    None, // fetch, the LIMIT, is applied to the final merge
+                )),
+                2,
+            ));
+        }
+
+        // build rest of tree
+        let mut next_level: VecDeque<MergeStream<C>> =
+            VecDeque::with_capacity(divided_streams.len() / max_streams_per_merge + 1);
+        while divided_streams.len() > 1 || !next_level.is_empty() {
+            let fan_in: Vec<MergeStream<C>> = divided_streams
+                .drain(0..std::cmp::min(max_streams_per_merge, divided_streams.len()))
+                .collect();
+
+            next_level.push_back(spawn_buffered_merge(
+                Box::pin(SortPreservingMergeStream::new(
+                    Box::new(InterleaveMergeStream::new(fan_in)),
+                    metrics.clone(),
+                    batch_size,
+                    if divided_streams.is_empty() && next_level.is_empty() {
+                        fetch
+                    } else {
+                        None
+                    }, // fetch, the LIMIT, is applied to the final merge
+                )),
+                2,
+            ));
+            // in order to maintain sort-preserving streams, don't mix the merge tree levels.
+            if divided_streams.is_empty() {
+                divided_streams = std::mem::take(&mut next_level);
+            }
+        }
 
         Self {
             aborted: false,
             metrics: metrics.clone(),
             record_batch_collector: batch_tracker,
             schema: schema.clone(),
-            cascade: Box::pin(SortPreservingMergeStream::new(
-                Box::new(streams),
-                metrics,
-                batch_size,
-                fetch,
-            )),
+            cascade: divided_streams
+                .remove(0)
+                .expect("must have a root merge stream"),
         }
     }
 
@@ -339,5 +411,33 @@ impl<C: CursorValues + Send + Unpin + 'static> RecordBatchStream
 {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+}
+
+fn spawn_buffered_merge<C: CursorValues + Send + 'static>(
+    mut input: MergeStream<C>,
+    capacity: usize,
+) -> MergeStream<C> {
+    // Use tokio only if running from a multi-thread tokio context
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+        {
+            let mut builder = ReceiverStreamBuilder::new(capacity);
+
+            let sender = builder.tx();
+
+            builder.spawn(async move {
+                while let Some(item) = input.next().await {
+                    if sender.send(item).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                Ok(())
+            });
+
+            builder.build()
+        }
+        _ => input,
     }
 }

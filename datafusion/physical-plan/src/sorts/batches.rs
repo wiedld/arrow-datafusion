@@ -82,7 +82,6 @@ use super::cursor::{Cursor, CursorValues};
 ///       yielding BatchRowSets
 ///  which represents partial batches
 ///
-#[derive(Debug)]
 pub struct BatchRowSet<C: CursorValues> {
     /// Unique identifier of a record batch
     batch_id: BatchId,
@@ -138,6 +137,17 @@ impl<C: CursorValues> BatchRowSet<C> {
     /// Used to adjust current `row_idx` from sliced BatchRowSets, into absolute idx for record_batch.
     pub fn get_offset_from_abs_idx(&self) -> usize {
         self.cursor_offset_from_batch_start
+    }
+}
+
+impl<C: CursorValues> std::fmt::Debug for BatchRowSet<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchRowSet")
+            .field("batch_id", &self.batch_id)
+            .field("num_cursor_values", &self.cursor.cursor_values().len())
+            .field("cursor_offset_from_batch_start", &self.cursor_offset_from_batch_start)
+            .field("current_idx", &self.cursor.current_index())
+            .finish()
     }
 }
 

@@ -34,7 +34,7 @@ pub struct SortOrderBuilder<C: CursorValues> {
 
     /// The accumulated stream indexes from which to pull rows
     /// Consists of a tuple of `(batch_id, row_idx)`
-    indices: Vec<(BatchId, usize)>,
+    indices: Vec<SortOrder>,
 }
 
 impl<C: CursorValues> SortOrderBuilder<C> {
