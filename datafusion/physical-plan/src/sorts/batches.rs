@@ -145,7 +145,10 @@ impl<C: CursorValues> std::fmt::Debug for BatchRowSet<C> {
         f.debug_struct("BatchRowSet")
             .field("batch_id", &self.batch_id)
             .field("num_cursor_values", &self.cursor.cursor_values().len())
-            .field("cursor_offset_from_batch_start", &self.cursor_offset_from_batch_start)
+            .field(
+                "cursor_offset_from_batch_start",
+                &self.cursor_offset_from_batch_start,
+            )
             .field("current_idx", &self.cursor.current_index())
             .finish()
     }

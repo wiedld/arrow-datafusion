@@ -330,32 +330,33 @@ impl<C: CursorValues + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
         &mut self,
         yielded_sort_order: YieldedSortOrder<C>,
     ) -> Result<RecordBatch> {
-        let (batch_rowsets, sort_order) = yielded_sort_order;
+        let (_, sort_order) = yielded_sort_order;
+
+        // each BatchRowSet is unique (hashmap keyed) per batchid + rowset_abs_offset
+        let mut batches_seen: HashMap<(BatchId, usize), (usize, usize)> =
+            HashMap::with_capacity(sort_order.len()); // hashmap values = (batch_idx, max_row_idx)
 
         let mut batches_to_interleave = Vec::with_capacity(sort_order.len());
-        let mut batches_seen: HashMap<BatchId, (usize, usize)> =
-            HashMap::with_capacity(sort_order.len()); // (batch_idx, max_row_idx)
+        // when assigning new batch_idx in the batches_to_interleave, need to track original unique BatchRowSet
+        let mut batch_idx_assignments: HashMap<usize, (BatchId, usize)> =
+            HashMap::with_capacity(sort_order.len());
 
-        let row_idx_offsets = batch_rowsets.iter().fold(
-            HashMap::with_capacity(batch_rowsets.len()),
-            |mut acc, rowset| {
-                acc.insert(rowset.batch_id(), rowset.get_offset_from_abs_idx());
-                acc
-            },
-        );
         let mut adjusted_sort_order = Vec::with_capacity(sort_order.len());
 
-        for (batch_id, row_idx) in sort_order.iter() {
-            let batch_idx = match batches_seen.entry(*batch_id) {
+        for ((batch_id, batchrowset_abs_offset), row_idx) in sort_order.iter() {
+            let batch_idx = match batches_seen.entry((*batch_id, *batchrowset_abs_offset))
+            {
                 Entry::Occupied(entry) => entry.get().0,
                 Entry::Vacant(entry) => {
                     let batch_idx = batches_to_interleave.len();
                     batches_to_interleave.push(*batch_id);
+                    batch_idx_assignments
+                        .insert(batch_idx, (*batch_id, *batchrowset_abs_offset));
                     entry.insert((batch_idx, *row_idx));
                     batch_idx
                 }
             };
-            adjusted_sort_order.push((batch_idx, row_idx_offsets[batch_id] + *row_idx));
+            adjusted_sort_order.push((batch_idx, batchrowset_abs_offset + *row_idx));
         }
 
         let batches = self
@@ -365,9 +366,10 @@ impl<C: CursorValues + Send + Unpin + 'static> SortPreservingCascadeStream<C> {
         // remove record_batches (from the batch tracker) that are fully yielded
         let batches_to_remove = batches
             .iter()
+            .enumerate()
             .zip(batches_to_interleave)
-            .filter_map(|(batch, batch_id)| {
-                let max_row_idx = batches_seen[&batch_id].1;
+            .filter_map(|((batch_idx, batch), batch_id)| {
+                let max_row_idx = batches_seen[&batch_idx_assignments[&batch_idx]].1;
                 if batch.num_rows() == max_row_idx + 1 {
                     Some(batch_id)
                 } else {

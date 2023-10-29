@@ -366,6 +366,10 @@ impl<C: CursorValues + std::marker::Send> InterleaveMergeStream<C> {
             .and_then(|queue| queue.pop_front())
     }
 
+    // TODO: replace this with a proper ascii diagram!
+    // Including BatchRowsets abs_offset (used in the SortOrder too).
+    //
+    //
     // The input [`SortOrder`] is across batches.
     // We need to further parse the cursors into smaller batches.
     //
@@ -386,36 +390,49 @@ impl<C: CursorValues + std::marker::Send> InterleaveMergeStream<C> {
         batch_rowsets: Vec<BatchRowSet<C>>,
         sort_order: Vec<SortOrder>,
     ) -> Result<()> {
-        let mut rowsets_per_batch: HashMap<BatchId, BatchRowSet<C>, RandomState> =
-            HashMap::with_capacity_and_hasher(batch_rowsets.len(), RandomState::new());
+        // each BatchRowSet is unique per batchid + rowset_abs_offset
+        let mut rowsets_per_batch: HashMap<
+            (BatchId, usize),
+            BatchRowSet<C>,
+            RandomState,
+        > = HashMap::with_capacity_and_hasher(batch_rowsets.len(), RandomState::new());
         for rowset in batch_rowsets {
-            rowsets_per_batch.insert(rowset.batch_id(), rowset);
+            rowsets_per_batch.insert(
+                (rowset.batch_id(), rowset.get_offset_from_abs_idx()),
+                rowset,
+            );
         }
 
         let mut interleaved_rowsets: Vec<BatchRowSet<C>> =
             Vec::with_capacity(sort_order.len());
 
-        let (mut prev_batch_id, mut prev_row_idx) = sort_order[0];
+        let ((mut prev_batch_id, mut prev_batchrowset_abs_offset), mut prev_row_idx) =
+            sort_order[0];
         let mut len = 0;
 
-        for (batch_id, row_idx) in sort_order.iter() {
-            if prev_batch_id == *batch_id {
+        for ((batch_id, batchrowset_abs_offset), row_idx) in sort_order.iter() {
+            if prev_batch_id == *batch_id
+                && prev_batchrowset_abs_offset == *batchrowset_abs_offset
+            {
                 len += 1;
                 continue;
             } else {
                 // parse rowset, in order to interleave
                 let rowset = rowsets_per_batch
-                    .get(&prev_batch_id)
+                    .get(&(prev_batch_id, prev_batchrowset_abs_offset))
                     .expect("rowset should exist");
                 let parsed_rowset = rowset.slice(prev_row_idx, len);
                 interleaved_rowsets.push(parsed_rowset);
 
                 prev_batch_id = *batch_id;
                 prev_row_idx = *row_idx;
+                prev_batchrowset_abs_offset = *batchrowset_abs_offset;
                 len = 1;
             }
         }
-        if let Some(rowset) = rowsets_per_batch.get(&prev_batch_id) {
+        if let Some(rowset) =
+            rowsets_per_batch.get(&(prev_batch_id, prev_batchrowset_abs_offset))
+        {
             let parsed_rowset = rowset.slice(prev_row_idx, len);
             interleaved_rowsets.push(parsed_rowset);
         }

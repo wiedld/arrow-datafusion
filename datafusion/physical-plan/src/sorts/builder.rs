@@ -21,7 +21,7 @@ use super::batches::{BatchId, BatchRowSet};
 use super::cursor::CursorValues;
 
 pub type YieldedSortOrder<C> = (Vec<BatchRowSet<C>>, Vec<SortOrder>);
-pub type SortOrder = (BatchId, usize); // (batch_id, row_idx)
+pub type SortOrder = ((BatchId, usize), usize); // ((batch_id, batchrowset_abs_offset), row_idx)
 
 /// Provides an API to incrementally build a [`SortOrder`] from partitioned [`RecordBatch`](arrow::record_batch::RecordBatch)es
 #[derive(Debug)]
@@ -66,7 +66,10 @@ impl<C: CursorValues> SortOrderBuilder<C> {
         // The loser tree represents 1 node taken up by all ongoing sorts (min heap)
         // plus an extra node at the top for the winner. Hence -1 to get winner's idx.
         let row_idx = rowset.cursor.current_index() - 1;
-        self.indices.push((rowset.batch_id(), row_idx));
+        self.indices.push((
+            (rowset.batch_id(), rowset.get_offset_from_abs_idx()),
+            row_idx,
+        ));
 
         if rowset.cursor.is_finished() {
             let sorted = std::mem::take(&mut self.active_rowsets[stream_idx])
@@ -129,20 +132,23 @@ impl<C: CursorValues> SortOrderBuilder<C> {
     /// representing (in total) up to N batch size.
     ///
     ///         BatchRowSets
-    /// ┌────────────────────────┐
-    /// │    Cursor     BatchId  │
-    /// │ ┌──────────┐ ┌───────┐ │
-    /// │ │  1..7    │ │   A   │ |  (sliced to partial batches)
-    /// │ ├──────────┤ ├───────┤ │
-    /// │ │  11..14  │ │   B   │ |
-    /// │ └──────────┘ └───────┘ │
-    /// └────────────────────────┘
+    /// ┌───────────────────────────────────┐
+    /// │    Cursor     BatchId   AbsOffset │
+    /// │ ┌──────────┐ ┌───────┐  ┌───────┐ │
+    /// │ │  1..7    │ │   A   │  │   0   │ |  (sliced to partial batches)
+    /// │ ├──────────┤ ├───────┤  ├───────┤ │
+    /// │ │  11..14  │ │   B   │  │   0   │ |
+    /// │ ├──────────┤ ├───────┤  ├───────┤ │
+    /// │ │  1..3    │ │   A   │  │   8   │ |  (1..3 + abs_offset=8 is actually rows 8..10)
+    /// │ └──────────┘ └───────┘  └───────┘ │  (Cursor has no awareness of offset. Only current sliced CursorValues.)
+    /// └───────────────────────────────────┘
+    ///
     ///
     ///
     ///         SortOrder
-    /// ┌─────────────────────────────┐
-    /// | (B,11) (A,1) (A,2) (B,12)...|  (up to N rows)
-    /// └─────────────────────────────┘
+    /// ┌─────────────────────────────────────────────┐
+    /// | ((B,0),11) ((A,0),1) ((A,0),2) ((B,0),12)...|  (up to N rows)
+    /// └─────────────────────────────────────────────┘
     ///
     /// This will drain the internal state of the builder, and return `None` if there are no pending.
     #[allow(dead_code)]
