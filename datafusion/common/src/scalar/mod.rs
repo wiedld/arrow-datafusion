@@ -1746,7 +1746,7 @@ impl ScalarValue {
     }
 
     /// Converts `Vec<ScalarValue>` where each element has type corresponding to
-    /// `data_type`, to a [`ListArray`].
+    /// `data_type`, to a single element [`ListArray`].
     ///
     /// Example
     /// ```
@@ -4453,7 +4453,8 @@ mod tests {
         // The alignment requirements differ across architectures and
         // thus the size of the enum appears to as well
 
-        assert_eq!(std::mem::size_of::<ScalarValue>(), 48);
+        // The value can be changed depending on rust version
+        assert_eq!(std::mem::size_of::<ScalarValue>(), 64);
     }
 
     #[test]
