@@ -32,6 +32,7 @@ pub(crate) use self::json::plan_to_json;
 #[cfg(feature = "parquet")]
 pub use self::parquet::{ParquetExec, ParquetFileMetrics, ParquetFileReaderFactory};
 
+use ::parquet::file::metadata::KeyValue;
 pub use arrow_file::ArrowExec;
 pub use avro::AvroExec;
 pub use csv::{CsvConfig, CsvExec, CsvOpener};
@@ -90,6 +91,9 @@ pub struct FileSinkConfig {
     pub table_partition_cols: Vec<(String, DataType)>,
     /// Controls whether existing data should be overwritten by this sink
     pub overwrite: bool,
+    /// Optional, additional metadata to be inserted into the key_value_metadata
+    /// for the written [`FileMetaData`](https://docs.rs/parquet/latest/parquet/file/metadata/struct.FileMetaData.html).
+    pub key_value_metadata: Option<Vec<KeyValue>>,
 }
 
 impl FileSinkConfig {

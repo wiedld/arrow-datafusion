@@ -873,6 +873,7 @@ fn roundtrip_json_sink() -> Result<()> {
         output_schema: schema.clone(),
         table_partition_cols: vec![("plan_type".to_string(), DataType::Utf8)],
         overwrite: true,
+        key_value_metadata: None,
     };
     let data_sink = Arc::new(JsonSink::new(
         file_sink_config,
@@ -908,6 +909,7 @@ fn roundtrip_csv_sink() -> Result<()> {
         output_schema: schema.clone(),
         table_partition_cols: vec![("plan_type".to_string(), DataType::Utf8)],
         overwrite: true,
+        key_value_metadata: None,
     };
     let data_sink = Arc::new(CsvSink::new(
         file_sink_config,
@@ -960,6 +962,7 @@ fn roundtrip_parquet_sink() -> Result<()> {
         output_schema: schema.clone(),
         table_partition_cols: vec![("plan_type".to_string(), DataType::Utf8)],
         overwrite: true,
+        key_value_metadata: None,
     };
     let data_sink = Arc::new(ParquetSink::new(
         file_sink_config,

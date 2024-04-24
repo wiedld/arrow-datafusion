@@ -24,7 +24,9 @@ use crate::{
 
 use parquet::{
     basic::{BrotliLevel, GzipLevel, ZstdLevel},
-    file::properties::{EnabledStatistics, WriterProperties, WriterVersion},
+    file::properties::{
+        EnabledStatistics, WriterProperties, WriterPropertiesBuilder, WriterVersion,
+    },
     schema::types::ColumnPath,
 };
 
@@ -46,7 +48,7 @@ impl ParquetWriterOptions {
     }
 }
 
-impl TryFrom<&TableParquetOptions> for ParquetWriterOptions {
+impl TryFrom<&TableParquetOptions> for WriterPropertiesBuilder {
     type Error = DataFusionError;
 
     fn try_from(parquet_options: &TableParquetOptions) -> Result<Self> {
@@ -165,10 +167,14 @@ impl TryFrom<&TableParquetOptions> for ParquetWriterOptions {
             }
         }
 
-        // ParquetWriterOptions will have defaults for the remaining fields (e.g. key_value_metadata & sorting_columns)
-        Ok(ParquetWriterOptions {
-            writer_options: builder.build(),
-        })
+        // builder will have defaults for the remaining fields (e.g. key_value_metadata & sorting_columns)
+        Ok(builder)
+    }
+}
+
+impl From<WriterPropertiesBuilder> for ParquetWriterOptions {
+    fn from(value: WriterPropertiesBuilder) -> Self {
+        ParquetWriterOptions::new(value.build())
     }
 }
 

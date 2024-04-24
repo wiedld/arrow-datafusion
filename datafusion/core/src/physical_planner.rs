@@ -595,6 +595,7 @@ impl DefaultPhysicalPlanner {
                         output_schema: Arc::new(schema),
                         table_partition_cols,
                         overwrite: false,
+                        key_value_metadata: None,
                     };
                     let mut table_options = session_state.default_table_options();
                     let sink_format: Arc<dyn FileFormat> = match format_options {

@@ -66,7 +66,7 @@ use parquet::arrow::{
 };
 use parquet::file::footer::{decode_footer, decode_metadata};
 use parquet::file::metadata::ParquetMetaData;
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::file::statistics::Statistics as ParquetStatistics;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::format::FileMetaData;
@@ -645,7 +645,10 @@ impl DataSink for ParquetSink {
         data: SendableRecordBatchStream,
         context: &Arc<TaskContext>,
     ) -> Result<u64> {
-        let parquet_props = ParquetWriterOptions::try_from(&self.parquet_options)?;
+        let parquet_props: ParquetWriterOptions =
+            WriterPropertiesBuilder::try_from(&self.parquet_options)?
+                .set_key_value_metadata(self.config.key_value_metadata.clone())
+                .into();
 
         let object_store = context
             .runtime_env()
@@ -1862,6 +1865,7 @@ mod tests {
             output_schema: schema.clone(),
             table_partition_cols: vec![],
             overwrite: true,
+            key_value_metadata: None,
         };
         let parquet_sink = Arc::new(ParquetSink::new(
             file_sink_config,
@@ -1933,6 +1937,7 @@ mod tests {
             output_schema: schema.clone(),
             table_partition_cols: vec![("a".to_string(), DataType::Utf8)], // add partitioning
             overwrite: true,
+            key_value_metadata: None,
         };
         let parquet_sink = Arc::new(ParquetSink::new(
             file_sink_config,
