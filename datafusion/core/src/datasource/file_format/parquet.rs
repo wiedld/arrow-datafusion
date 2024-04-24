@@ -1139,7 +1139,7 @@ mod tests {
     };
     use parquet::arrow::arrow_reader::ArrowReaderOptions;
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
-    use parquet::file::metadata::{ParquetColumnIndex, ParquetOffsetIndex};
+    use parquet::file::metadata::{KeyValue, ParquetColumnIndex, ParquetOffsetIndex};
     use parquet::file::page_index::index::Index;
     use tokio::fs::File;
     use tokio::io::AsyncWrite;
@@ -1865,7 +1865,10 @@ mod tests {
             output_schema: schema.clone(),
             table_partition_cols: vec![],
             overwrite: true,
-            key_value_metadata: None,
+            key_value_metadata: Some(vec![KeyValue {
+                key: "my-data".into(),
+                value: Some("stuff".to_string()),
+            }]),
         };
         let parquet_sink = Arc::new(ParquetSink::new(
             file_sink_config,
@@ -1903,7 +1906,10 @@ mod tests {
         let (
             path,
             FileMetaData {
-                num_rows, schema, ..
+                num_rows,
+                schema,
+                key_value_metadata,
+                ..
             },
         ) = written.take(1).next().unwrap();
         let path_parts = path.parts().collect::<Vec<_>>();
@@ -1918,6 +1924,13 @@ mod tests {
             schema.iter().any(|col_schema| col_schema.name == "b"),
             "output file metadata should contain col b"
         );
+
+        let key_value_metadata = key_value_metadata.unwrap();
+        let my_metadata = key_value_metadata
+            .iter()
+            .filter(|kv| kv.key == "my-data")
+            .collect::<Vec<_>>();
+        assert_eq!(my_metadata.len(), 1);
 
         Ok(())
     }
