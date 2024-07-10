@@ -762,7 +762,6 @@ impl DataSink for ParquetSink {
                         .close()
                         .await
                         .map_err(DataFusionError::ParquetError)?;
-                    drop(reservation);
                     Ok((path, file_metadata))
                 });
             } else {
@@ -924,7 +923,6 @@ fn spawn_rg_join_and_finalize_task(
             let (writer, col_reservation) = task.join_unwind().await?;
             let encoded_size = writer.get_estimated_total_bytes();
             rg_reservation.grow(encoded_size);
-            drop(col_reservation);
             finalized_rg.push(writer.close()?);
         }
 
@@ -1062,7 +1060,6 @@ async fn concatenate_parallel_row_groups(
                 object_store_writer
                     .write_all(buff_to_flush.as_slice())
                     .await?;
-                rg_reservation.shrink(buff_to_flush.len());
                 buff_to_flush.clear();
                 file_reservation.try_resize(buff_to_flush.len())?; // will set to zero
             }
