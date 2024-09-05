@@ -346,6 +346,8 @@ impl<I: MemoryPool> MemoryPool for TrackConsumersPool<I> {
             .and_modify(|bytes| {
                 bytes.fetch_add(additional as u64, Ordering::AcqRel);
             });
+
+        println!("REPORT: {}", self.report_top(5));
     }
 
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
@@ -380,6 +382,8 @@ impl<I: MemoryPool> MemoryPool for TrackConsumersPool<I> {
             .and_modify(|bytes| {
                 bytes.fetch_add(additional as u64, Ordering::AcqRel);
             });
+        println!("REPORT: {}", self.report_top(5));
+
         Ok(())
     }
 
